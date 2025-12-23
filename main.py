@@ -4,8 +4,8 @@ import datetime
 import random
 import json
 import ast
-from io import BytesIO # 소리 데이터를 메모리에서 다루기 위해 추가
-from gtts import gTTS  # 구글 TTS 라이브러리 추가
+from io import BytesIO
+from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
 # ---------------------------------------------------------
@@ -13,32 +13,34 @@ from streamlit_gsheets import GSheetsConnection
 # ---------------------------------------------------------
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# [수정된] 데이터 로드 함수
-# [수정된] 데이터 로드 함수: JSON은 절대 보지 않고, 시트만 믿습니다.
 def load_data():
     try:
-        # ttl=0 : 캐시(기억)를 남기지 말고 매번 시트에서 새로 가져오라는 뜻
+        # ttl=0 : 캐시 없이 매번 최신 데이터 읽기
         df = conn.read(worksheet="Sheet1", ttl=0)
         
-        # 데이터가 비어있어도 JSON에서 복구하지 않음 (덮어쓰기 방지)
-        # 그냥 빈 상태면 빈 상태인 대로 둡니다.
+        # 시트가 비어있을 경우 경고
         if df.empty:
-            st.warning("구글 시트가 비어있습니다. 시트에 데이터를 채워주세요.")
+            st.warning("Google Sheet is empty. Please add words to your sheet.")
+            st.stop()
             
         return df
     except Exception as e:
-        st.error(f"Google Sheet 연결 에러: {e}")
+        st.error(f"Google Sheet Connection Error: {e}")
         st.stop()
-        
+
+# 데이터 로드
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
 
 df = st.session_state.vocab_db
+# 필수 컬럼 확인 및 처리
 if 'next_review' not in df.columns:
     df['next_review'] = None
-    
+
+# 날짜 포맷 정리
 df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
 
+# 세션 변수 초기화
 if 'current_word_id' not in st.session_state:
     st.session_state.current_word_id = None
 if 'quiz_options' not in st.session_state:
@@ -46,16 +48,24 @@ if 'quiz_options' not in st.session_state:
 if 'show_answer' not in st.session_state:
     st.session_state.show_answer = False
 
+# 이번 세션에서 공부한 단어 수 카운트
+if 'session_count' not in st.session_state:
+    st.session_state.session_count = 0
+
 # ---------------------------------------------------------
 # 2. 로직 함수
 # ---------------------------------------------------------
 def get_next_word(df, difficulty, topic):
     today_str = str(datetime.date.today())
     
+    # 난이도 및 주제 필터
     mask = (df['level'] >= difficulty[0]) & (df['level'] <= difficulty[1])
+    
+    # [수정됨] 주제가 'All'이 아닐 경우 해당 주제만 필터링
     if topic != "All":
         mask = mask & (df['topic'] == topic)
     
+    # 복습 날짜 필터
     date_mask = df['next_review'] <= today_str
     
     candidates = df[mask & date_mask]
@@ -81,47 +91,80 @@ def update_srs(word_id, is_correct):
         
     next_date = datetime.date.today() + datetime.timedelta(days=days_to_add)
     
+    # 메모리 업데이트
     st.session_state.vocab_db.at[idx, 'box'] = new_box
     st.session_state.vocab_db.at[idx, 'next_review'] = str(next_date)
     
+    # 구글 시트 업데이트
     conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
     
+    # 상태 초기화
     st.session_state.current_word_id = None
     st.session_state.quiz_options = []
     st.session_state.show_answer = False
-    st.toast("Progress Saved to Google Sheets! 💾")
+    
+    # 공부한 단어 수 증가
+    st.session_state.session_count += 1
+    
+    st.toast("Progress Saved! 💾")
 
 # ---------------------------------------------------------
 # 3. UI 구성
 # ---------------------------------------------------------
-st.title("🎓 TOEFL Voca (with Voice 🔊)")
+st.title("🎓 TOEFL Voca Master")
 
 with st.sidebar:
     st.header("Settings")
-    topic = st.selectbox("Topic", ["All", "Social Science", "Science", "Linguistics", "Sociology", "Economics", "Medicine", "Art", "Biology", "History", "Geology", "Chemistry", "Ecology", "Psychology", "Business", "Law", "Physics", "Philosophy", "Education", "Technology", "General"])
+    
+    # 목표 단어 수 설정
+    goal_options = [10, 15, 20, "Unlimited"]
+    session_goal = st.selectbox("🎯 Daily Goal (Words)", goal_options)
+    
+    # 진행 상황 표시
+    if session_goal != "Unlimited":
+        st.write(f"**Progress:** {st.session_state.session_count} / {session_goal}")
+        st.progress(min(st.session_state.session_count / session_goal, 1.0))
+    
+    st.divider()
+    
+    # [수정됨] 사용자가 요청한 주제 목록 적용
+    topic_list = ["All", "Science", "History", "Social Science", "Business", "Environment", "Education"]
+    topic = st.selectbox("Topic (Subject)", topic_list)
+    
     difficulty = st.slider("Level Difficulty", 1, 3, (1, 3))
     
     today = str(datetime.date.today())
-    rem_count = len(st.session_state.vocab_db[st.session_state.vocab_db['next_review'] <= today])
+    # 현재 설정된 주제와 난이도에 맞는 남은 단어 수 계산
+    filtered_df = st.session_state.vocab_db
+    if topic != "All":
+        filtered_df = filtered_df[filtered_df['topic'] == topic]
+    filtered_df = filtered_df[(filtered_df['level'] >= difficulty[0]) & (filtered_df['level'] <= difficulty[1])]
+    rem_count = len(filtered_df[filtered_df['next_review'] <= today])
+    
     st.write(f"Words to review: {rem_count}")
     
-# 버튼 이름을 더 명확하게 바꿉니다
+    # 초기화 버튼 (데이터 유지)
     if st.button("Reset Progress (Keep Words)"):
-        # 1. 현재 보고 있는 데이터(80개)를 가져옵니다.
         df_reset = st.session_state.vocab_db.copy()
-        
-        # 2. 점수(box)와 날짜(next_review)만 초기화합니다.
         df_reset['box'] = 0
         df_reset['next_review'] = '0000-00-00'
-        
-        # 3. 구글 시트에 업데이트합니다.
         conn.update(worksheet="Sheet1", data=df_reset)
-        
-        # 4. 앱을 새로고침합니다.
-        st.toast("Progress has been reset! (Words are safe)")
+        st.toast("Progress reset! Start fresh.")
         st.session_state.clear()
         st.rerun()
 
+# 목표 달성 체크
+if session_goal != "Unlimited" and st.session_state.session_count >= session_goal:
+    st.balloons()
+    st.success(f"🏆 Mission Complete! You reviewed {session_goal} words today.")
+    
+    if st.button("Start New Session (Reset Count)"):
+        st.session_state.session_count = 0
+        st.rerun()
+        
+    st.stop() 
+
+# 메인 로직
 if st.session_state.current_word_id is None:
     new_id = get_next_word(st.session_state.vocab_db, difficulty, topic)
     if new_id is not None:
@@ -153,8 +196,8 @@ if st.session_state.current_word_id is None:
             
         st.session_state.quiz_options = options 
     else:
-        st.success("🎉 All done for today!")
-        st.write("Check your Google Sheet to see the progress.")
+        st.success(f"🎉 No words left for '{topic}'!")
+        st.write("Try changing the Topic or Level.")
         st.stop()
 
 word_id = st.session_state.current_word_id
@@ -167,21 +210,15 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- [새 기능] 발음 듣기 버튼 ---
-# --- [수정된 기능] 발음 듣기 (되감기 코드 추가) ---
+# 발음 듣기
 try:
     sound_file = BytesIO()
     tts = gTTS(text=row['word'], lang='en')
     tts.write_to_fp(sound_file)
-    
-    # [중요] 다 쓴 데이터를 처음부터 읽을 수 있도록 '커서'를 맨 앞으로 이동!
     sound_file.seek(0)
-    
-    # format을 'audio/mpeg'로 명시 (호환성 향상)
     st.audio(sound_file, format='audio/mpeg')
-    
 except Exception as e:
-    st.warning(f"Voice Error: {e}")
+    st.warning(f"Voice unavailable: {e}")
 
 tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
 
