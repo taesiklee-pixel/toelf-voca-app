@@ -228,68 +228,72 @@ elif st.session_state.app_mode == 'quiz':
     #         st.stop()
 
     # -------------------------------------------------------
-    # 문제 로딩 로직 (품사 기반 오답 필터링 적용)
+    # 문제 로딩 로직 (엄격한 품사 필터링 O, 단어 형태 제한 X)
     # -------------------------------------------------------
-    
     if st.session_state.current_word_id is None:
         new_id = get_next_word()
         if new_id is not None:
             st.session_state.current_word_id = new_id
             
             # 1. 현재 문제 단어 정보 가져오기
-            current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
+            df = st.session_state.vocab_db
+            current_word = df[df['id'] == new_id].iloc[0]
             
-            # 정답 보기 (현재 단어의 동의어들)
+            # 정답 보기 파싱
             synonyms = current_word['synonyms']
             if isinstance(synonyms, str):
                 try: synonyms = ast.literal_eval(synonyms)
                 except: synonyms = [synonyms]
             
-            # 보기 1번은 정답 중 하나
             correct_option = synonyms[0] 
             options = [correct_option]
             
-            # 2. 오답 풀(Pool) 만들기전략
-            # "현재 단어와 품사(pos)가 같은 다른 단어들"을 찾습니다.
-            # 그 단어들이 가진 synonym들을 오답 후보로 씁니다.
+            # 2. 오답 풀(Pool) 만들기 전략
+            # 품사 정보 가져오기 (소문자로 변환하여 비교)
+            target_pos = str(current_word.get('pos', '')).strip().lower()
             
-            df = st.session_state.vocab_db
-            target_pos = current_word.get('pos', None) # 현재 단어의 품사 (예: verb)
+            # 비교를 위해 DB의 pos 컬럼도 소문자로 변환한 임시 컬럼 생성
+            df_pool = df.copy()
+            df_pool['pos_norm'] = df_pool['pos'].fillna('').astype(str).str.strip().str.lower()
             
-            # (A) 품사 정보가 있고, 같은 품사를 가진 다른 단어가 충분할 때
-            if target_pos and len(df[df['pos'] == target_pos]) > 5:
-                # 같은 품사이면서 + 현재 단어가 아닌 것들
-                candidate_df = df[(df['pos'] == target_pos) & (df['id'] != new_id)]
+            # [품사 필터링 로직]
+            # 품사 정보가 있고 유효하다면, 무조건 같은 품사 내에서만 찾습니다.
+            if target_pos and target_pos != 'nan' and target_pos != '':
+                candidate_df = df_pool[(df_pool['pos_norm'] == target_pos) & (df_pool['id'] != new_id)]
+                
+                # 만약 같은 품사 단어가 하나도 없으면 에러 방지를 위해 전체 개방
+                if candidate_df.empty:
+                    candidate_df = df_pool[df_pool['id'] != new_id]
             else:
-                # (B) 품사가 없거나 데이터가 부족하면 -> 그냥 전체 단어에서 찾음 (에러 방지)
-                candidate_df = df[df['id'] != new_id]
+                # 품사 정보가 없는 경우 전체 개방
+                candidate_df = df_pool[df_pool['id'] != new_id]
 
-            # 오답 후보군 수집 (후보 단어들의 synonym을 싹 긁어모음)
+            # 3. 오답 추출 및 정제
             wrong_pool = []
             for syn_list in candidate_df['synonyms']:
                 if isinstance(syn_list, str):
                     try: syn_list = ast.literal_eval(syn_list)
                     except: continue
                 if isinstance(syn_list, list):
-                    wrong_pool.extend(syn_list)
+                    # [수정됨] 공백 체크(is_single_word) 로직 제거
+                    # 품사만 맞다면 숙어(phrase)도 그대로 후보에 넣습니다.
+                    for w in syn_list:
+                        wrong_pool.append(w)
             
-            # 3. 정제 및 선택
-            # 중복 제거
+            # 중복 제거 및 정답 제거
             wrong_pool = list(set(wrong_pool))
-            
-            # 정답 리스트에 있는 단어가 오답으로 나오면 안 되므로 제거
             wrong_pool = [w for w in wrong_pool if w not in synonyms]
             
-            # 오답 개수 설정 (3개 뽑아서 총 4지선다)
-            # 만약 오답 후보가 부족하면 "Random A" 등으로 채움
+            # 4. 오답 3개 뽑기
             needed = 3
             if len(wrong_pool) >= needed:
                 wrong_options = random.sample(wrong_pool, needed)
             else:
-                wrong_options = wrong_pool + ["Option A", "Option B", "Option C"]
-                wrong_options = wrong_options[:needed]
+                # 후보가 부족하면 있는 것 다 쓰고 나머지는 더미로 채움
+                defaults = ["Option A", "Option B", "Option C"]
+                wrong_options = wrong_pool + defaults[:needed - len(wrong_pool)]
             
-            # 4. 최종 보기 합치기 및 섞기
+            # 5. 합치기 및 섞기
             options = options + wrong_options
             random.shuffle(options)
             
