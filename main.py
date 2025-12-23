@@ -14,28 +14,22 @@ from streamlit_gsheets import GSheetsConnection
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # [수정된] 데이터 로드 함수
+# [수정된] 데이터 로드 함수: JSON은 절대 보지 않고, 시트만 믿습니다.
 def load_data():
     try:
-        # ttl=0 : "기억(캐시)하지 말고 매번 새로 읽어와!"라는 강력한 명령입니다.
+        # ttl=0 : 캐시(기억)를 남기지 말고 매번 시트에서 새로 가져오라는 뜻
         df = conn.read(worksheet="Sheet1", ttl=0)
         
-        # --- [중요 변경] 자동 초기화 코드 삭제 ---
-        # 사용자가 시트에 데이터를 추가했는데, 앱이 마음대로 원본(JSON)으로 덮어쓰지 않도록
-        # 아래 코드를 주석 처리하거나 지웁니다.
-        # ------------------------------------
-        # if df.empty or len(df) < 5: 
-        #     with open('vocab.json', 'r', encoding='utf-8') as f:
-        #         data = json.load(f)
-        #     df = pd.DataFrame(data)
-        #     df['box'] = 0
-        #     df['next_review'] = None
-        #     conn.update(worksheet="Sheet1", data=df)
-        #     st.toast("Initialization: Data uploaded to Google Sheets!")
+        # 데이터가 비어있어도 JSON에서 복구하지 않음 (덮어쓰기 방지)
+        # 그냥 빈 상태면 빈 상태인 대로 둡니다.
+        if df.empty:
+            st.warning("구글 시트가 비어있습니다. 시트에 데이터를 채워주세요.")
             
         return df
     except Exception as e:
         st.error(f"Google Sheet 연결 에러: {e}")
         st.stop()
+        
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
 
