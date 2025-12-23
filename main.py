@@ -105,13 +105,20 @@ with st.sidebar:
     rem_count = len(st.session_state.vocab_db[st.session_state.vocab_db['next_review'] <= today])
     st.write(f"Words to review: {rem_count}")
     
-    if st.button("Reset All Data"):
-        with open('vocab.json', 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        reset_df = pd.DataFrame(data)
-        reset_df['box'] = 0
-        reset_df['next_review'] = None
-        conn.update(worksheet="Sheet1", data=reset_df)
+# 버튼 이름을 더 명확하게 바꿉니다
+    if st.button("Reset Progress (Keep Words)"):
+        # 1. 현재 보고 있는 데이터(80개)를 가져옵니다.
+        df_reset = st.session_state.vocab_db.copy()
+        
+        # 2. 점수(box)와 날짜(next_review)만 초기화합니다.
+        df_reset['box'] = 0
+        df_reset['next_review'] = '0000-00-00'
+        
+        # 3. 구글 시트에 업데이트합니다.
+        conn.update(worksheet="Sheet1", data=df_reset)
+        
+        # 4. 앱을 새로고침합니다.
+        st.toast("Progress has been reset! (Words are safe)")
         st.session_state.clear()
         st.rerun()
 
