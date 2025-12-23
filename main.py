@@ -13,24 +13,29 @@ from streamlit_gsheets import GSheetsConnection
 # ---------------------------------------------------------
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# [수정된] 데이터 로드 함수
 def load_data():
     try:
-        df = conn.read(worksheet="Sheet1")
+        # ttl=0 : "기억(캐시)하지 말고 매번 새로 읽어와!"라는 강력한 명령입니다.
+        df = conn.read(worksheet="Sheet1", ttl=0)
         
-        if df.empty or len(df) < 5: 
-            with open('vocab.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            df = pd.DataFrame(data)
-            df['box'] = 0
-            df['next_review'] = None
-            conn.update(worksheet="Sheet1", data=df)
-            st.toast("Initialization: Data uploaded to Google Sheets!")
+        # --- [중요 변경] 자동 초기화 코드 삭제 ---
+        # 사용자가 시트에 데이터를 추가했는데, 앱이 마음대로 원본(JSON)으로 덮어쓰지 않도록
+        # 아래 코드를 주석 처리하거나 지웁니다.
+        # ------------------------------------
+        # if df.empty or len(df) < 5: 
+        #     with open('vocab.json', 'r', encoding='utf-8') as f:
+        #         data = json.load(f)
+        #     df = pd.DataFrame(data)
+        #     df['box'] = 0
+        #     df['next_review'] = None
+        #     conn.update(worksheet="Sheet1", data=df)
+        #     st.toast("Initialization: Data uploaded to Google Sheets!")
             
         return df
     except Exception as e:
         st.error(f"Google Sheet 연결 에러: {e}")
         st.stop()
-
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
 
