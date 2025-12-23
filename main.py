@@ -3,7 +3,8 @@ import pandas as pd
 import datetime
 import random
 import json
-import os  # 파일 존재 여부 확인을 위해 추가
+import os 
+import ast # CSV 리스트 파싱을 위해 명시적 임포트
 
 # ---------------------------------------------------------
 # 1. 데이터 세팅 (CSV 우선 로드, 없으면 JSON 로드)
@@ -16,28 +17,29 @@ if 'vocab_db' not in st.session_state:
     if os.path.exists(CSV_FILE):
         try:
             df = pd.read_csv(CSV_FILE)
-            # CSV로 읽으면 None이 NaN(Not a Number)으로 변환되므로 처리 필요할 수 있음
-            # 하지만 pandas 함수들이 NaN을 잘 처리하므로 일단 유지
+            # 날짜 컬럼을 문자열로 확실하게 변환 (에러 방지 핵심)
+            df['next_review'] = df['next_review'].astype(str)
+            # 'nan'이나 'None' 문자열을 실제 None 값으로 치환
+            df['next_review'] = df['next_review'].replace(['nan', 'None'], None)
         except Exception as e:
             st.error(f"Error loading saved progress: {e}")
             st.stop()
-
+            
     # 2. CSV가 없으면(처음 실행이면) JSON 원본 로드
     else:
         try:
             with open(JSON_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             df = pd.DataFrame(data)
-
-            # 초기화 컬럼 추가
+            
             if 'box' not in df.columns:
                 df['box'] = 0
             if 'next_review' not in df.columns:
-                df['next_review'] = None
-
-            # 바로 CSV로 한 번 저장 (파일 생성)
+                df['next_review'] = None # 초기값은 None
+                
+            # 바로 CSV로 한 번 저장
             df.to_csv(CSV_FILE, index=False)
-
+            
         except FileNotFoundError:
             st.error(f"❌ '{JSON_FILE}' file not found. Please make sure the file exists.")
             st.stop()
@@ -52,85 +54,80 @@ if 'quiz_options' not in st.session_state:
 if 'show_answer' not in st.session_state:
     st.session_state.show_answer = False
 
-
 # ---------------------------------------------------------
 # 2. 로직 함수 (SRS 및 CSV 저장)
 # ---------------------------------------------------------
 def get_next_word(df, difficulty, topic):
     """조건에 맞는 단어 중 하나를 뽑아 세션 상태에 고정"""
     today_str = str(datetime.date.today())
-
+    
     # 필터링: (레벨 조건) AND (주제 조건)
     mask = (df['level'] >= difficulty[0]) & (df['level'] <= difficulty[1])
     if topic != "All":
         mask = mask & (df['topic'] == topic)
-
-    # 날짜 필터: next_review가 비어있거나(NaN/None), 오늘보다 작거나 같은 경우
-    # pd.isna()를 사용하여 None과 NaN을 모두 처리
-    date_mask = (pd.isna(df['next_review'])) | (df['next_review'] <= today_str)
-
+    
+    # [수정된 부분] 날짜 필터: 에러 방지를 위해 fillna 사용
+    # None(처음 보는 단어)은 '0000-00-00'으로 치환하여 오늘보다 작게 만듦 -> 학습 대상 포함
+    date_check_col = df['next_review'].fillna('0000-00-00')
+    date_mask = date_check_col <= today_str
+    
     candidates = df[mask & date_mask]
-
+    
     if len(candidates) == 0:
         return None
-
+    
     # 랜덤 선택하여 ID 반환
     selected = candidates.sample(1).iloc[0]
     return selected['id']
-
 
 def update_srs(word_id, is_correct):
     """DB 업데이트, CSV 저장, UI 상태 초기화"""
     df = st.session_state.vocab_db
     idx = df[df['id'] == word_id].index[0]
-
+    
     current_box = df.at[idx, 'box']
-
+    
     if is_correct:
         new_box = min(current_box + 1, 5)
-        days_to_add = int(2 ** new_box)
+        days_to_add = int(2 ** new_box) 
     else:
         new_box = 0
-        days_to_add = 0
-
+        days_to_add = 0 
+        
     next_date = datetime.date.today() + datetime.timedelta(days=days_to_add)
-
-    # 1. 메모리(Session State) 업데이트
+    
+    # 1. 메모리 업데이트
     st.session_state.vocab_db.at[idx, 'box'] = new_box
     st.session_state.vocab_db.at[idx, 'next_review'] = str(next_date)
-
-    # 2. 파일(CSV) 저장 (영구 저장) --- [핵심 추가 부분] ---
+    
+    # 2. 파일 저장
     st.session_state.vocab_db.to_csv(CSV_FILE, index=False)
-
-    # 3. UI 상태 초기화 (다음 단어 준비)
+    
+    # 3. UI 상태 초기화
     st.session_state.current_word_id = None
     st.session_state.quiz_options = []
     st.session_state.show_answer = False
 
-
 # ---------------------------------------------------------
 # 3. UI 구성
 # ---------------------------------------------------------
-st.title("🎓 TOEFL Voca Master (Auto-Save)")
+st.title("🎓 TOEFL Voca Master")
 
 # 사이드바 설정
 with st.sidebar:
     st.header("Settings")
-    # JSON 파일에 있는 실제 토픽들을 가져오면 더 좋습니다 (지금은 하드코딩 유지)
-    topic = st.selectbox("Topic",
-                         ["All", "Social Science", "Science", "Linguistics", "Sociology", "Economics", "Medicine",
-                          "Art", "Biology", "History", "Geology", "Chemistry", "Ecology", "Psychology", "Business",
-                          "Law", "Physics", "Philosophy", "Education", "Technology", "General"])
+    topic = st.selectbox("Topic", ["All", "Social Science", "Science", "Linguistics", "Sociology", "Economics", "Medicine", "Art", "Biology", "History", "Geology", "Chemistry", "Ecology", "Psychology", "Business", "Law", "Physics", "Philosophy", "Education", "Technology", "General"])
     difficulty = st.slider("Level Difficulty", 1, 3, (1, 3))
-
-    # 남은 단어 수 계산
+    
+    # [수정된 부분] 남은 단어 수 계산 (에러 났던 곳)
     today = str(datetime.date.today())
     df = st.session_state.vocab_db
-    # 복습 대상: 날짜가 지났거나(<= today), 아직 날짜가 없는(isna) 단어
-    rem_count = len(df[(pd.isna(df['next_review'])) | (df['next_review'] <= today)])
+    
+    # 에러 방지: NaN 값을 '0000-00-00'으로 채워서 비교 (문자열 vs 문자열 비교로 통일)
+    rem_count = len(df[df['next_review'].fillna('0000-00-00') <= today])
     st.write(f"Words to review today: {rem_count}")
-
-    if st.button("Reset All Progress (Warning!)"):
+    
+    if st.button("Reset Progress"):
         if os.path.exists(CSV_FILE):
             os.remove(CSV_FILE)
             st.cache_data.clear()
@@ -142,36 +139,38 @@ if st.session_state.current_word_id is None:
     new_id = get_next_word(st.session_state.vocab_db, difficulty, topic)
     if new_id is not None:
         st.session_state.current_word_id = new_id
-
+        
         # 퀴즈 보기 생성
         current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
-        # JSON 문자열 리스트 처리 (CSV 로드 시 문자열로 변환될 수 있음)
-        # 안전하게 리스트인지 확인
         synonyms = current_word['synonyms']
         if isinstance(synonyms, str):
-            # CSV 저장 후 다시 읽으면 "['a', 'b']" 같은 문자열이 될 수 있음. eval로 리스트 복원
-            import ast
-
             synonyms = ast.literal_eval(synonyms)
-
-        options = synonyms[:]
-
+            
+        options = synonyms[:] 
+        
         # 오답 풀 생성
         wrong_pool = []
         other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
-
+        
         for syn_list in other_words['synonyms']:
             if isinstance(syn_list, str):
-                import ast
-
-                syn_list = ast.literal_eval(syn_list)
-            wrong_pool.extend(syn_list)
-
+                try:
+                    syn_list = ast.literal_eval(syn_list)
+                except:
+                    continue # 파싱 에러나면 건너뜀
+            if isinstance(syn_list, list):
+                wrong_pool.extend(syn_list)
+        
         if len(wrong_pool) >= 3:
             wrong_options = random.sample(wrong_pool, 2)
             options = [options[0]] + wrong_options
             random.shuffle(options)
-        st.session_state.quiz_options = options
+        else:
+            # 오답 데이터가 부족할 경우를 대비한 안전장치
+            options = options + ["Similar Word A", "Similar Word B"]
+            options = options[:3]
+            
+        st.session_state.quiz_options = options 
 
     else:
         st.success("🎉 You've finished all words for today!")
@@ -182,13 +181,6 @@ if st.session_state.current_word_id is None:
 word_id = st.session_state.current_word_id
 row = st.session_state.vocab_db[st.session_state.vocab_db['id'] == word_id].iloc[0]
 
-# CSV에서 읽어온 리스트 문자열 처리 (synonyms)
-synonyms_display = row['synonyms']
-if isinstance(synonyms_display, str):
-    import ast
-
-    synonyms_display = ast.literal_eval(synonyms_display)
-
 # UI 렌더링
 st.markdown(f"""
 <div style="padding: 20px; border-radius: 10px; background-color: #f0f2f6; text-align: center; margin-bottom: 20px;">
@@ -197,11 +189,19 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["📖 Flashcard (Definition)", "🧩 Synonym Quiz"])
+tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
 
 # --- TAB 1: 뜻풀이 (Flashcard) ---
 with tab1:
     st.subheader("Do you know this word?")
+    
+    # 동의어 디스플레이용 처리
+    synonyms_display = row['synonyms']
+    if isinstance(synonyms_display, str):
+        try:
+            synonyms_display = ast.literal_eval(synonyms_display)
+        except:
+            synonyms_display = [synonyms_display]
 
     if not st.session_state.show_answer:
         if st.button("🔍 Show Definition & Example", use_container_width=True):
@@ -211,10 +211,10 @@ with tab1:
         st.markdown(f"**Definition:** {row['definition']}")
         st.markdown(f"**Example:** *\"{row['example']}\"*")
         st.markdown(f"**Synonyms:** {', '.join(synonyms_display)}")
-
+        
         st.divider()
         st.caption("Rate your knowledge to proceed:")
-
+        
         col1, col2 = st.columns(2)
         with col1:
             if st.button("❌ No (Review Soon)", use_container_width=True):
@@ -228,6 +228,14 @@ with tab1:
 # --- TAB 2: 퀴즈 (Quiz) ---
 with tab2:
     st.write(f"Which word is a synonym for **'{row['word']}'**?")
+    
+    # 동의어 정답 확인용 처리
+    synonyms_check = row['synonyms']
+    if isinstance(synonyms_check, str):
+        try:
+            synonyms_check = ast.literal_eval(synonyms_check)
+        except:
+            synonyms_check = [synonyms_check]
 
     if not st.session_state.quiz_options:
         st.warning("Not enough data to generate quiz.")
@@ -235,18 +243,18 @@ with tab2:
         with st.form("quiz_form"):
             choice = st.radio("Choose the best answer:", st.session_state.quiz_options)
             submitted = st.form_submit_button("Submit Answer")
-
+            
             if submitted:
-                if choice in synonyms_display:
+                if choice in synonyms_check:
                     st.success(f"Correct! '{choice}' is a synonym.")
                     st.session_state.last_quiz_result = True
                 else:
-                    st.error(f"Wrong. The answer was one of: {', '.join(synonyms_display)}")
+                    st.error(f"Wrong. The answer was one of: {', '.join(synonyms_check)}")
                     st.session_state.last_quiz_result = False
 
         if 'last_quiz_result' in st.session_state:
             if st.button("Next Word ➡️"):
                 result = st.session_state.last_quiz_result
-                del st.session_state['last_quiz_result']
-                update_srs(word_id, result)
+                del st.session_state['last_quiz_result'] 
+                update_srs(word_id, result) 
                 st.rerun()
