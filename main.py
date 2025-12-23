@@ -162,14 +162,20 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # --- [새 기능] 발음 듣기 버튼 ---
-# gTTS로 오디오 생성
+# --- [수정된 기능] 발음 듣기 (되감기 코드 추가) ---
 try:
     sound_file = BytesIO()
     tts = gTTS(text=row['word'], lang='en')
     tts.write_to_fp(sound_file)
-    st.audio(sound_file, format='audio/mp3')
+    
+    # [중요] 다 쓴 데이터를 처음부터 읽을 수 있도록 '커서'를 맨 앞으로 이동!
+    sound_file.seek(0)
+    
+    # format을 'audio/mpeg'로 명시 (호환성 향상)
+    st.audio(sound_file, format='audio/mpeg')
+    
 except Exception as e:
-    st.warning("Voice unavailable currently.")
+    st.warning(f"Voice Error: {e}")
 
 tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
 
