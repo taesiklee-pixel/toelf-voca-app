@@ -4,29 +4,25 @@ import datetime
 import random
 import json
 import ast
+from io import BytesIO # 소리 데이터를 메모리에서 다루기 위해 추가
+from gtts import gTTS  # 구글 TTS 라이브러리 추가
 from streamlit_gsheets import GSheetsConnection
 
 # ---------------------------------------------------------
 # 1. 데이터 세팅 (Google Sheets 연결)
 # ---------------------------------------------------------
-# 구글 시트 연결 객체 생성
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 데이터 로드 함수 (캐시 사용 안 함 - 실시간 동기화 위해 ttl=0 권장)
 def load_data():
     try:
-        # 시트의 데이터를 읽어옴
-        df = conn.read(worksheet="Sheet1")  # 시트 이름이 Sheet1인지 확인 (기본값)
+        df = conn.read(worksheet="Sheet1")
         
-        # 만약 시트가 비어있다면(처음 실행), JSON 파일 내용을 업로드
         if df.empty or len(df) < 5: 
             with open('vocab.json', 'r', encoding='utf-8') as f:
                 data = json.load(f)
             df = pd.DataFrame(data)
             df['box'] = 0
             df['next_review'] = None
-            
-            # 시트에 초기 데이터 쓰기
             conn.update(worksheet="Sheet1", data=df)
             st.toast("Initialization: Data uploaded to Google Sheets!")
             
@@ -35,19 +31,15 @@ def load_data():
         st.error(f"Google Sheet 연결 에러: {e}")
         st.stop()
 
-# 세션 상태에 데이터 로드
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
 
-# 초기화 및 데이터 타입 정리
 df = st.session_state.vocab_db
 if 'next_review' not in df.columns:
     df['next_review'] = None
     
-# 날짜 컬럼 정리 (None -> 문자열 '0000-00-00')
 df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
 
-# 세션 변수 초기화
 if 'current_word_id' not in st.session_state:
     st.session_state.current_word_id = None
 if 'quiz_options' not in st.session_state:
@@ -56,17 +48,15 @@ if 'show_answer' not in st.session_state:
     st.session_state.show_answer = False
 
 # ---------------------------------------------------------
-# 2. 로직 함수 (GSheets 저장 포함)
+# 2. 로직 함수
 # ---------------------------------------------------------
 def get_next_word(df, difficulty, topic):
     today_str = str(datetime.date.today())
     
-    # 필터링
     mask = (df['level'] >= difficulty[0]) & (df['level'] <= difficulty[1])
     if topic != "All":
         mask = mask & (df['topic'] == topic)
     
-    # 날짜 필터 (이미 위에서 '0000-00-00' 처리를 했으므로 안전하게 비교)
     date_mask = df['next_review'] <= today_str
     
     candidates = df[mask & date_mask]
@@ -92,15 +82,11 @@ def update_srs(word_id, is_correct):
         
     next_date = datetime.date.today() + datetime.timedelta(days=days_to_add)
     
-    # 1. 메모리 업데이트
     st.session_state.vocab_db.at[idx, 'box'] = new_box
     st.session_state.vocab_db.at[idx, 'next_review'] = str(next_date)
     
-    # 2. 구글 시트 업데이트 (가장 중요!)
-    # 전체 데이터를 다시 씁니다.
     conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
     
-    # 3. UI 초기화
     st.session_state.current_word_id = None
     st.session_state.quiz_options = []
     st.session_state.show_answer = False
@@ -109,7 +95,7 @@ def update_srs(word_id, is_correct):
 # ---------------------------------------------------------
 # 3. UI 구성
 # ---------------------------------------------------------
-st.title("🎓 TOEFL Voca (Cloud Sync)")
+st.title("🎓 TOEFL Voca (with Voice 🔊)")
 
 with st.sidebar:
     st.header("Settings")
@@ -117,12 +103,10 @@ with st.sidebar:
     difficulty = st.slider("Level Difficulty", 1, 3, (1, 3))
     
     today = str(datetime.date.today())
-    # 남은 단어 수
     rem_count = len(st.session_state.vocab_db[st.session_state.vocab_db['next_review'] <= today])
     st.write(f"Words to review: {rem_count}")
     
-    if st.button("Reset All Data (Danger)"):
-        # 초기화 로직: JSON 다시 로드 -> 시트 덮어쓰기
+    if st.button("Reset All Data"):
         with open('vocab.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
         reset_df = pd.DataFrame(data)
@@ -132,7 +116,6 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-# 메인 로직
 if st.session_state.current_word_id is None:
     new_id = get_next_word(st.session_state.vocab_db, difficulty, topic)
     if new_id is not None:
@@ -146,7 +129,6 @@ if st.session_state.current_word_id is None:
             
         options = synonyms[:] 
         
-        # 오답 풀
         wrong_pool = []
         other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
         for syn_list in other_words['synonyms']:
@@ -169,7 +151,6 @@ if st.session_state.current_word_id is None:
         st.write("Check your Google Sheet to see the progress.")
         st.stop()
 
-# 현재 단어 표시
 word_id = st.session_state.current_word_id
 row = st.session_state.vocab_db[st.session_state.vocab_db['id'] == word_id].iloc[0]
 
@@ -179,6 +160,16 @@ st.markdown(f"""
     <h1 style="color: #1f77b4; font-size: 3em; margin: 0;">{row['word']}</h1>
 </div>
 """, unsafe_allow_html=True)
+
+# --- [새 기능] 발음 듣기 버튼 ---
+# gTTS로 오디오 생성
+try:
+    sound_file = BytesIO()
+    tts = gTTS(text=row['word'], lang='en')
+    tts.write_to_fp(sound_file)
+    st.audio(sound_file, format='audio/mp3')
+except Exception as e:
+    st.warning("Voice unavailable currently.")
 
 tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
 
