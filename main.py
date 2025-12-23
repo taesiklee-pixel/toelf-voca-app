@@ -319,4 +319,5 @@ elif st.session_state.app_mode == 'summary':
     
     if st.button("🏠 Back to Home", use_container_width=True):
         st.session_state.app_mode = 'setup'
-        st.session_state.session_stats = {'correct
+        st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
+        st.rerun()
