@@ -9,38 +9,38 @@ from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
 # ---------------------------------------------------------
-# 1. 데이터 세팅 (Google Sheets 연결)
+# 1. 데이터 및 세션 초기화
 # ---------------------------------------------------------
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
     try:
-        # ttl=0 : 캐시 없이 매번 최신 데이터 읽기
+        # 캐시 없이 매번 최신 데이터 로드
         df = conn.read(worksheet="Sheet1", ttl=0)
-        
-        # 시트가 비어있을 경우 경고
         if df.empty:
-            st.warning("Google Sheet is empty. Please add words to your sheet.")
+            st.warning("Google Sheet is empty.")
             st.stop()
-            
         return df
     except Exception as e:
         st.error(f"Google Sheet Connection Error: {e}")
         st.stop()
 
-# 데이터 로드
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
 
+# 데이터 전처리
 df = st.session_state.vocab_db
-# 필수 컬럼 확인 및 처리
 if 'next_review' not in df.columns:
     df['next_review'] = None
-
-# 날짜 포맷 정리
 df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
 
-# 세션 변수 초기화
+# --- [앱 상태 관리 변수들] ---
+if 'app_mode' not in st.session_state:
+    st.session_state.app_mode = 'setup'  # setup / quiz / summary
+if 'session_config' not in st.session_state:
+    st.session_state.session_config = {} # 사용자가 선택한 설정 저장
+if 'session_stats' not in st.session_state:
+    st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
 if 'current_word_id' not in st.session_state:
     st.session_state.current_word_id = None
 if 'quiz_options' not in st.session_state:
@@ -48,225 +48,275 @@ if 'quiz_options' not in st.session_state:
 if 'show_answer' not in st.session_state:
     st.session_state.show_answer = False
 
-# 이번 세션에서 공부한 단어 수 카운트
-if 'session_count' not in st.session_state:
-    st.session_state.session_count = 0
-
 # ---------------------------------------------------------
 # 2. 로직 함수
 # ---------------------------------------------------------
-def get_next_word(df, difficulty, topic):
-    today_str = str(datetime.date.today())
+def get_next_word():
+    df = st.session_state.vocab_db
+    config = st.session_state.session_config
     
-    # 난이도 및 주제 필터
+    # 1. 난이도 필터
+    difficulty = config.get('difficulty', (1, 3))
     mask = (df['level'] >= difficulty[0]) & (df['level'] <= difficulty[1])
     
-    # [수정됨] 주제가 'All'이 아닐 경우 해당 주제만 필터링
+    # 2. 주제 필터
+    topic = config.get('topic', 'All')
     if topic != "All":
         mask = mask & (df['topic'] == topic)
+        
+    # 3. 모드별 필터 (일반 vs 오답노트)
+    mode = config.get('mode', 'Standard Study')
+    today_str = str(datetime.date.today())
     
-    # 복습 날짜 필터
-    date_mask = df['next_review'] <= today_str
+    if mode == 'Review Mistakes Only':
+        # 오답 노트: Box가 0인 것(틀려서 리셋된 것)만 필터링
+        logic_mask = df['box'] == 0
+    else:
+        # 일반 모드: 오늘 복습해야 할 단어 OR 아직 안 본 단어
+        logic_mask = df['next_review'] <= today_str
     
-    candidates = df[mask & date_mask]
+    candidates = df[mask & logic_mask]
     
     if len(candidates) == 0:
         return None
     
+    # 랜덤 추출
     selected = candidates.sample(1).iloc[0]
     return selected['id']
 
 def update_srs(word_id, is_correct):
     df = st.session_state.vocab_db
     idx = df[df['id'] == word_id].index[0]
-    
     current_box = df.at[idx, 'box']
     
     if is_correct:
+        # 정답: 통계 업데이트
+        st.session_state.session_stats['correct'] += 1
+        # SRS 로직: 박스 이동
         new_box = min(current_box + 1, 5)
-        days_to_add = int(2 ** new_box) 
+        days_to_add = int(2 ** new_box)
     else:
+        # 오답: 통계 업데이트
+        st.session_state.session_stats['wrong'] += 1
+        # SRS 로직: 박스 0으로 초기화 (이게 곧 오답 기록입니다)
         new_box = 0
-        days_to_add = 0 
+        days_to_add = 0
+    
+    # 전체 진행 수 증가
+    st.session_state.session_stats['total'] += 1
         
     next_date = datetime.date.today() + datetime.timedelta(days=days_to_add)
     
-    # 메모리 업데이트
+    # DB 메모리 업데이트
     st.session_state.vocab_db.at[idx, 'box'] = new_box
     st.session_state.vocab_db.at[idx, 'next_review'] = str(next_date)
     
-    # 구글 시트 업데이트
+    # 구글 시트 저장
     conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
     
     # 상태 초기화
     st.session_state.current_word_id = None
     st.session_state.quiz_options = []
     st.session_state.show_answer = False
-    
-    # 공부한 단어 수 증가
-    st.session_state.session_count += 1
-    
-    st.toast("Progress Saved! 💾")
+    st.toast(f"{'Correct! 🟢' if is_correct else 'Saved to Mistakes 🔴'}")
 
 # ---------------------------------------------------------
 # 3. UI 구성
 # ---------------------------------------------------------
 st.title("🎓 TOEFL Voca Master")
 
+# 사이드바는 이제 '데이터 관리' 용도로만 사용
 with st.sidebar:
-    st.header("Settings")
-    
-    # 목표 단어 수 설정
-    goal_options = [10, 15, 20, "Unlimited"]
-    session_goal = st.selectbox("🎯 Daily Goal (Words)", goal_options)
-    
-    # 진행 상황 표시
-    if session_goal != "Unlimited":
-        st.write(f"**Progress:** {st.session_state.session_count} / {session_goal}")
-        st.progress(min(st.session_state.session_count / session_goal, 1.0))
-    
-    st.divider()
-    
-    # [수정됨] 사용자가 요청한 주제 목록 적용
-    topic_list = ["All", "Science", "History", "Social Science", "Business", "Environment", "Education"]
-    topic = st.selectbox("Topic (Subject)", topic_list)
-    
-    difficulty = st.slider("Level Difficulty", 1, 3, (1, 3))
-    
-    today = str(datetime.date.today())
-    # 현재 설정된 주제와 난이도에 맞는 남은 단어 수 계산
-    filtered_df = st.session_state.vocab_db
-    if topic != "All":
-        filtered_df = filtered_df[filtered_df['topic'] == topic]
-    filtered_df = filtered_df[(filtered_df['level'] >= difficulty[0]) & (filtered_df['level'] <= difficulty[1])]
-    rem_count = len(filtered_df[filtered_df['next_review'] <= today])
-    
-    st.write(f"Words to review: {rem_count}")
-    
-    # 초기화 버튼 (데이터 유지)
-    if st.button("Reset Progress (Keep Words)"):
+    st.header("Data Management")
+    if st.button("Reset All Progress (Keep Words)"):
         df_reset = st.session_state.vocab_db.copy()
         df_reset['box'] = 0
         df_reset['next_review'] = '0000-00-00'
         conn.update(worksheet="Sheet1", data=df_reset)
-        st.toast("Progress reset! Start fresh.")
+        st.toast("DB Reset Complete!")
         st.session_state.clear()
         st.rerun()
+    st.info("Settings are now on the main screen.")
 
-# 목표 달성 체크
-if session_goal != "Unlimited" and st.session_state.session_count >= session_goal:
-    st.balloons()
-    st.success(f"🏆 Mission Complete! You reviewed {session_goal} words today.")
+# --- 화면 1: 설정 (Setup) ---
+if st.session_state.app_mode == 'setup':
+    st.markdown("### ⚙️ Study Setup")
     
-    if st.button("Start New Session (Reset Count)"):
-        st.session_state.session_count = 0
-        st.rerun()
-        
-    st.stop() 
-
-# 메인 로직
-if st.session_state.current_word_id is None:
-    new_id = get_next_word(st.session_state.vocab_db, difficulty, topic)
-    if new_id is not None:
-        st.session_state.current_word_id = new_id
-        
-        current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
-        synonyms = current_word['synonyms']
-        if isinstance(synonyms, str):
-            try: synonyms = ast.literal_eval(synonyms)
-            except: synonyms = [synonyms]
-            
-        options = synonyms[:] 
-        
-        wrong_pool = []
-        other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
-        for syn_list in other_words['synonyms']:
-            if isinstance(syn_list, str):
-                try: syn_list = ast.literal_eval(syn_list)
-                except: continue
-            if isinstance(syn_list, list):
-                wrong_pool.extend(syn_list)
-        
-        if len(wrong_pool) >= 3:
-            wrong_options = random.sample(wrong_pool, 2)
-            options = [options[0]] + wrong_options
-            random.shuffle(options)
-        else:
-            options = options + ["Similar A", "Similar B"][:3]
-            
-        st.session_state.quiz_options = options 
-    else:
-        st.success(f"🎉 No words left for '{topic}'!")
-        st.write("Try changing the Topic or Level.")
-        st.stop()
-
-word_id = st.session_state.current_word_id
-row = st.session_state.vocab_db[st.session_state.vocab_db['id'] == word_id].iloc[0]
-
-st.markdown(f"""
-<div style="padding: 20px; border-radius: 10px; background-color: #f0f2f6; text-align: center; margin-bottom: 20px;">
-    <p style="color: grey; font-size: 0.9em;">{row['topic']} | Level {row['level']}</p>
-    <h1 style="color: #1f77b4; font-size: 3em; margin: 0;">{row['word']}</h1>
-</div>
-""", unsafe_allow_html=True)
-
-# 발음 듣기
-try:
-    sound_file = BytesIO()
-    tts = gTTS(text=row['word'], lang='en')
-    tts.write_to_fp(sound_file)
-    sound_file.seek(0)
-    st.audio(sound_file, format='audio/mpeg')
-except Exception as e:
-    st.warning(f"Voice unavailable: {e}")
-
-tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
-
-with tab1:
-    syn_disp = row['synonyms']
-    if isinstance(syn_disp, str):
-        try: syn_disp = ast.literal_eval(syn_disp)
-        except: syn_disp = [syn_disp]
-
-    if not st.session_state.show_answer:
-        if st.button("🔍 Show Definition", use_container_width=True):
-            st.session_state.show_answer = True
-            st.rerun()
-    else:
-        st.markdown(f"**Def:** {row['definition']}")
-        st.markdown(f"**Ex:** *\"{row['example']}\"*")
-        st.markdown(f"**Syn:** {', '.join(syn_disp)}")
-        st.divider()
+    with st.form("setup_form"):
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("❌ No", use_container_width=True):
-                update_srs(word_id, False)
-                st.rerun()
+            topic_list = ["All", "Science", "History", "Social Science", "Business", "Environment", "Education"]
+            sel_topic = st.selectbox("Topic", topic_list)
+            
+            sel_mode = st.radio("Mode", ["Standard Study (SRS)", "Review Mistakes Only"], 
+                                help="Standard: Due words | Mistakes: Only words you got wrong (Box 0)")
+            
         with c2:
-            if st.button("✅ Yes", use_container_width=True):
-                update_srs(word_id, True)
+            sel_goal = st.selectbox("Daily Goal", [5, 10, 15, 20, 30])
+            sel_diff = st.slider("Difficulty", 1, 3, (1, 3))
+
+        submitted = st.form_submit_button("🚀 Start Session", use_container_width=True)
+        
+        if submitted:
+            # 설정 저장
+            st.session_state.session_config = {
+                'topic': sel_topic,
+                'goal': sel_goal,
+                'difficulty': sel_diff,
+                'mode': sel_mode
+            }
+            # 통계 초기화
+            st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
+            # 퀴즈 모드로 전환
+            st.session_state.app_mode = 'quiz'
+            st.rerun()
+
+# --- 화면 2: 퀴즈 (Quiz) ---
+elif st.session_state.app_mode == 'quiz':
+    config = st.session_state.session_config
+    stats = st.session_state.session_stats
+    
+    # 상단 진행바
+    goal = config['goal']
+    current = stats['total']
+    st.progress(min(current / goal, 1.0))
+    st.caption(f"Progress: {current} / {goal} (Topic: {config['topic']})")
+
+    # 목표 달성 체크
+    if current >= goal:
+        st.session_state.app_mode = 'summary'
+        st.rerun()
+
+    # 문제 로딩
+    if st.session_state.current_word_id is None:
+        new_id = get_next_word()
+        if new_id is not None:
+            st.session_state.current_word_id = new_id
+            
+            # 보기 생성 로직
+            current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
+            synonyms = current_word['synonyms']
+            if isinstance(synonyms, str):
+                try: synonyms = ast.literal_eval(synonyms)
+                except: synonyms = [synonyms]
+                
+            options = synonyms[:]
+            
+            # 오답 풀 만들기
+            wrong_pool = []
+            other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
+            for syn_list in other_words['synonyms']:
+                if isinstance(syn_list, str):
+                    try: syn_list = ast.literal_eval(syn_list)
+                    except: continue
+                if isinstance(syn_list, list):
+                    wrong_pool.extend(syn_list)
+            
+            if len(wrong_pool) >= 3:
+                wrong_options = random.sample(wrong_pool, 2)
+                options = [options[0]] + wrong_options
+                random.shuffle(options)
+            else:
+                options = options + ["Similar A", "Similar B"][:3]
+                
+            st.session_state.quiz_options = options
+        else:
+            st.warning("No words found matching your criteria!")
+            if st.button("Back to Home"):
+                st.session_state.app_mode = 'setup'
+                st.rerun()
+            st.stop()
+
+    # UI 렌더링
+    word_id = st.session_state.current_word_id
+    row = st.session_state.vocab_db[st.session_state.vocab_db['id'] == word_id].iloc[0]
+
+    st.markdown(f"""
+    <div style="padding: 30px; border-radius: 15px; background-color: #f0f2f6; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        <p style="color: grey; margin-bottom: 5px;">{row['topic']} | Level {row['level']}</p>
+        <h1 style="color: #2c3e50; font-size: 3.5em; margin: 0;">{row['word']}</h1>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 발음 듣기
+    try:
+        sound_file = BytesIO()
+        tts = gTTS(text=row['word'], lang='en')
+        tts.write_to_fp(sound_file)
+        sound_file.seek(0)
+        st.audio(sound_file, format='audio/mpeg')
+    except:
+        st.caption("Voice unavailable")
+
+    tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
+
+    with tab1:
+        syn_disp = row['synonyms']
+        if isinstance(syn_disp, str):
+            try: syn_disp = ast.literal_eval(syn_disp)
+            except: syn_disp = [syn_disp]
+
+        if not st.session_state.show_answer:
+            if st.button("🔍 Show Definition", use_container_width=True):
+                st.session_state.show_answer = True
+                st.rerun()
+        else:
+            st.info(f"**Definition:** {row['definition']}")
+            st.caption(f"**Example:** {row['example']}")
+            st.write(f"**Synonyms:** {', '.join(syn_disp)}")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("❌ Don't Know", use_container_width=True):
+                    update_srs(word_id, False)
+                    st.rerun()
+            with c2:
+                if st.button("✅ Know", use_container_width=True):
+                    update_srs(word_id, True)
+                    st.rerun()
+
+    with tab2:
+        st.write(f"Select the synonym for **'{row['word']}'**")
+        syn_check = row['synonyms']
+        if isinstance(syn_check, str):
+            try: syn_check = ast.literal_eval(syn_check)
+            except: syn_check = [syn_check]
+
+        with st.form("quiz_form"):
+            choice = st.radio("Options:", st.session_state.quiz_options)
+            if st.form_submit_button("Submit Answer"):
+                if choice in syn_check:
+                    st.success("Correct!")
+                    st.session_state.lqr = True
+                else:
+                    st.error(f"Wrong! The answer is {', '.join(syn_check)}")
+                    st.session_state.lqr = False
+        
+        if 'lqr' in st.session_state:
+            if st.button("Next Word ➡️", type="primary"):
+                res = st.session_state.lqr
+                del st.session_state['lqr']
+                update_srs(word_id, res)
                 st.rerun()
 
-with tab2:
-    st.write(f"Synonym for **'{row['word']}'**?")
-    syn_check = row['synonyms']
-    if isinstance(syn_check, str):
-        try: syn_check = ast.literal_eval(syn_check)
-        except: syn_check = [syn_check]
-
-    with st.form("quiz"):
-        choice = st.radio("Choose:", st.session_state.quiz_options)
-        if st.form_submit_button("Submit"):
-            if choice in syn_check:
-                st.success("Correct!")
-                st.session_state.lqr = True
-            else:
-                st.error(f"Wrong. Answer: {', '.join(syn_check)}")
-                st.session_state.lqr = False
+# --- 화면 3: 결과 요약 (Summary) ---
+elif st.session_state.app_mode == 'summary':
+    st.balloons()
+    st.markdown("## 🏆 Session Complete!")
     
-    if 'lqr' in st.session_state:
-        if st.button("Next ➡️"):
-            res = st.session_state.lqr
-            del st.session_state['lqr']
-            update_srs(word_id, res)
-            st.rerun()
+    stats = st.session_state.session_stats
+    score = int((stats['correct'] / stats['total']) * 100) if stats['total'] > 0 else 0
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total", stats['total'])
+    col2.metric("Correct 🟢", stats['correct'])
+    col3.metric("Wrong 🔴", stats['wrong'])
+    
+    st.progress(score / 100)
+    st.caption(f"Final Score: {score}%")
+    
+    st.divider()
+    
+    if st.button("🏠 Back to Home", use_container_width=True):
+        st.session_state.app_mode = 'setup'
+        st.session_state.session_stats = {'correct
