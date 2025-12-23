@@ -187,46 +187,121 @@ elif st.session_state.app_mode == 'quiz':
         st.session_state.app_mode = 'summary'
         st.rerun()
 
-    # 문제 로딩
+    # # 문제 로딩
+    # if st.session_state.current_word_id is None:
+    #     new_id = get_next_word()
+    #     if new_id is not None:
+    #         st.session_state.current_word_id = new_id
+            
+    #         # 보기 생성 로직
+    #         current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
+    #         synonyms = current_word['synonyms']
+    #         if isinstance(synonyms, str):
+    #             try: synonyms = ast.literal_eval(synonyms)
+    #             except: synonyms = [synonyms]
+                
+    #         options = synonyms[:]
+            
+    #         # 오답 풀 만들기
+    #         wrong_pool = []
+    #         other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
+    #         for syn_list in other_words['synonyms']:
+    #             if isinstance(syn_list, str):
+    #                 try: syn_list = ast.literal_eval(syn_list)
+    #                 except: continue
+    #             if isinstance(syn_list, list):
+    #                 wrong_pool.extend(syn_list)
+            
+    #         if len(wrong_pool) >= 3:
+    #             wrong_options = random.sample(wrong_pool, 2)
+    #             options = [options[0]] + wrong_options
+    #             random.shuffle(options)
+    #         else:
+    #             options = options + ["Similar A", "Similar B"][:3]
+                
+    #         st.session_state.quiz_options = options
+    #     else:
+    #         st.warning("No words found matching your criteria!")
+    #         if st.button("Back to Home"):
+    #             st.session_state.app_mode = 'setup'
+    #             st.rerun()
+    #         st.stop()
+
+    # -------------------------------------------------------
+    # 문제 로딩 로직 (품사 기반 오답 필터링 적용)
+    # -------------------------------------------------------
+    
     if st.session_state.current_word_id is None:
         new_id = get_next_word()
         if new_id is not None:
             st.session_state.current_word_id = new_id
             
-            # 보기 생성 로직
+            # 1. 현재 문제 단어 정보 가져오기
             current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
+            
+            # 정답 보기 (현재 단어의 동의어들)
             synonyms = current_word['synonyms']
             if isinstance(synonyms, str):
                 try: synonyms = ast.literal_eval(synonyms)
                 except: synonyms = [synonyms]
-                
-            options = synonyms[:]
             
-            # 오답 풀 만들기
+            # 보기 1번은 정답 중 하나
+            correct_option = synonyms[0] 
+            options = [correct_option]
+            
+            # 2. 오답 풀(Pool) 만들기전략
+            # "현재 단어와 품사(pos)가 같은 다른 단어들"을 찾습니다.
+            # 그 단어들이 가진 synonym들을 오답 후보로 씁니다.
+            
+            df = st.session_state.vocab_db
+            target_pos = current_word.get('pos', None) # 현재 단어의 품사 (예: verb)
+            
+            # (A) 품사 정보가 있고, 같은 품사를 가진 다른 단어가 충분할 때
+            if target_pos and len(df[df['pos'] == target_pos]) > 5:
+                # 같은 품사이면서 + 현재 단어가 아닌 것들
+                candidate_df = df[(df['pos'] == target_pos) & (df['id'] != new_id)]
+            else:
+                # (B) 품사가 없거나 데이터가 부족하면 -> 그냥 전체 단어에서 찾음 (에러 방지)
+                candidate_df = df[df['id'] != new_id]
+
+            # 오답 후보군 수집 (후보 단어들의 synonym을 싹 긁어모음)
             wrong_pool = []
-            other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
-            for syn_list in other_words['synonyms']:
+            for syn_list in candidate_df['synonyms']:
                 if isinstance(syn_list, str):
                     try: syn_list = ast.literal_eval(syn_list)
                     except: continue
                 if isinstance(syn_list, list):
                     wrong_pool.extend(syn_list)
             
-            if len(wrong_pool) >= 3:
-                wrong_options = random.sample(wrong_pool, 2)
-                options = [options[0]] + wrong_options
-                random.shuffle(options)
+            # 3. 정제 및 선택
+            # 중복 제거
+            wrong_pool = list(set(wrong_pool))
+            
+            # 정답 리스트에 있는 단어가 오답으로 나오면 안 되므로 제거
+            wrong_pool = [w for w in wrong_pool if w not in synonyms]
+            
+            # 오답 개수 설정 (3개 뽑아서 총 4지선다)
+            # 만약 오답 후보가 부족하면 "Random A" 등으로 채움
+            needed = 3
+            if len(wrong_pool) >= needed:
+                wrong_options = random.sample(wrong_pool, needed)
             else:
-                options = options + ["Similar A", "Similar B"][:3]
-                
+                wrong_options = wrong_pool + ["Option A", "Option B", "Option C"]
+                wrong_options = wrong_options[:needed]
+            
+            # 4. 최종 보기 합치기 및 섞기
+            options = options + wrong_options
+            random.shuffle(options)
+            
             st.session_state.quiz_options = options
+            
         else:
             st.warning("No words found matching your criteria!")
             if st.button("Back to Home"):
                 st.session_state.app_mode = 'setup'
                 st.rerun()
             st.stop()
-
+            
     # UI 렌더링
     word_id = st.session_state.current_word_id
     row = st.session_state.vocab_db[st.session_state.vocab_db['id'] == word_id].iloc[0]
