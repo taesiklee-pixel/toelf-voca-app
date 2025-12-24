@@ -414,154 +414,255 @@ def _extract_json(text: str):
     except Exception:
         return None
 
-def gemini_qc(question_text, example_blank, options, correct_answers, use_gemini=True):
+# def gemini_qc(question_text, example_blank, options, correct_answers, use_gemini=True):
+#     """
+#     Returns dict: {flag, reasons, llm_selected, llm_is_correct}
+#     - llm_selected / llm_is_correct는 절대 empty가 되지 않도록 fallback 포함
+#     - flag 기준:
+#         1) options에 정답이 없음
+#         2) blank인데 example_blank 비어있음
+#         3) LLM이 고른 답이 틀림 (원하면 이 기준은 끌 수도 있음)
+#         4) 응답 파싱 실패(모델 이상) -> flag=1
+#     """
+#     reasons = []
+#     flag = 0
+
+#     # 기본 데이터 QC
+#     has_correct_in_options = any(opt in correct_answers for opt in options)
+#     if not has_correct_in_options:
+#         flag = 1
+#         reasons.append("No correct answer included in options.")
+
+#     if "Fill in the blank" in question_text and (not example_blank or example_blank.strip() == ""):
+#         flag = 1
+#         reasons.append("Blank question has empty example_blank.")
+
+#     # 기본 fallback (항상 채움)
+#     fallback_selected = options[0] if options else ""
+#     fallback_is_correct = bool(fallback_selected in correct_answers)
+
+#     # Gemini 사용 안 함(=stub 모드): 그래도 '선택'은 하게 만들기
+#     if not use_gemini:
+#         llm_selected = fallback_selected
+#         llm_is_correct = fallback_is_correct
+#         # (선택) 틀리면 flag 올리기
+#         if not llm_is_correct:
+#             flag = 1
+#             reasons.append("LLM(selected by fallback) is incorrect.")
+#         return {
+#             "flag": int(flag),
+#             "reasons": reasons,
+#             "llm_selected": llm_selected,
+#             "llm_is_correct": bool(llm_is_correct)
+#         }
+
+#     # Gemini 호출
+#     try:
+#         import google.generativeai as genai
+
+#         api_key = st.secrets.get("GEMINI_API_KEY", "")
+#         if not api_key:
+#             # 키 없으면 자동 fallback
+#             llm_selected = fallback_selected
+#             llm_is_correct = fallback_is_correct
+#             flag = 1
+#             reasons.append("GEMINI_API_KEY missing; used fallback selection.")
+#             return {
+#                 "flag": int(flag),
+#                 "reasons": reasons,
+#                 "llm_selected": llm_selected,
+#                 "llm_is_correct": bool(llm_is_correct)
+#             }
+
+#         genai.configure(api_key=api_key)
+#         model = genai.GenerativeModel("gemini-1.5-flash")
+
+#         # 모델에 “사용자처럼 풀기” + 구조화 JSON 반환 요구
+#         prompt = {
+#             "role": "user",
+#             "parts": [f"""
+# You are taking a TOEFL vocabulary quiz. Choose the best option from the given choices.
+
+# Question:
+# {question_text}
+
+# Sentence (if any):
+# {example_blank}
+
+# Options:
+# {json.dumps(options, ensure_ascii=False)}
+
+# Return ONLY valid JSON with this schema:
+# {{
+#   "selected": "<one of the options exactly>",
+#   "confidence": 0.0,
+#   "notes": ["short reason 1", "short reason 2"]
+# }}
+
+# Rules:
+# - "selected" MUST be exactly one of the provided options.
+# - No extra text outside JSON.
+# """]
+#         }
+
+#         resp = model.generate_content(prompt)
+#         text = getattr(resp, "text", "") or ""
+#         data = _extract_json(text)
+
+#         if not data or "selected" not in data:
+#             # 파싱 실패 fallback
+#             llm_selected = fallback_selected
+#             llm_is_correct = fallback_is_correct
+#             flag = 1
+#             reasons.append("Gemini response parse failed; used fallback selection.")
+#             return {
+#                 "flag": int(flag),
+#                 "reasons": reasons,
+#                 "llm_selected": llm_selected,
+#                 "llm_is_correct": bool(llm_is_correct)
+#             }
+
+#         llm_selected = str(data["selected"]).strip()
+#         if llm_selected not in options:
+#             # 모델이 규칙 어겼으면 fallback
+#             llm_selected = fallback_selected
+#             flag = 1
+#             reasons.append("Gemini selected an option not in list; used fallback selection.")
+
+#         llm_is_correct = bool(llm_selected in correct_answers)
+
+#         # (QC 정책) LLM이 틀린 경우도 flag=1로 올리기
+#         if not llm_is_correct:
+#             flag = 1
+#             reasons.append("Gemini selected an incorrect answer.")
+
+#         # notes도 reasons에 붙이기(짧게)
+#         notes = data.get("notes", [])
+#         if isinstance(notes, list):
+#             for n in notes[:3]:
+#                 if isinstance(n, str) and n.strip():
+#                     reasons.append(f"Gemini: {n.strip()}")
+
+#         return {
+#             "flag": int(flag),
+#             "reasons": reasons,
+#             "llm_selected": llm_selected,
+#             "llm_is_correct": bool(llm_is_correct)
+#         }
+
+#     except Exception as e:
+#         # 호출 실패 fallback
+#         llm_selected = fallback_selected
+#         llm_is_correct = fallback_is_correct
+#         flag = 1
+#         reasons.append(f"Gemini call failed; used fallback selection. ({type(e).__name__})")
+#         return {
+#             "flag": int(flag),
+#             "reasons": reasons,
+#             "llm_selected": llm_selected,
+#             "llm_is_correct": bool(llm_is_correct)
+#         }
+
+def gemini_qc_real(question_text, example_blank, options, correct_answers):
     """
-    Returns dict: {flag, reasons, llm_selected, llm_is_correct}
-    - llm_selected / llm_is_correct는 절대 empty가 되지 않도록 fallback 포함
-    - flag 기준:
-        1) options에 정답이 없음
-        2) blank인데 example_blank 비어있음
-        3) LLM이 고른 답이 틀림 (원하면 이 기준은 끌 수도 있음)
-        4) 응답 파싱 실패(모델 이상) -> flag=1
+    Gemini가 실제로 보기 중 하나를 선택하게 하고,
+    선택값/정오답/flag/reasons를 반환.
     """
-    reasons = []
-    flag = 0
-
-    # 기본 데이터 QC
-    has_correct_in_options = any(opt in correct_answers for opt in options)
-    if not has_correct_in_options:
-        flag = 1
-        reasons.append("No correct answer included in options.")
-
-    if "Fill in the blank" in question_text and (not example_blank or example_blank.strip() == ""):
-        flag = 1
-        reasons.append("Blank question has empty example_blank.")
-
-    # 기본 fallback (항상 채움)
-    fallback_selected = options[0] if options else ""
-    fallback_is_correct = bool(fallback_selected in correct_answers)
-
-    # Gemini 사용 안 함(=stub 모드): 그래도 '선택'은 하게 만들기
-    if not use_gemini:
-        llm_selected = fallback_selected
-        llm_is_correct = fallback_is_correct
-        # (선택) 틀리면 flag 올리기
-        if not llm_is_correct:
-            flag = 1
-            reasons.append("LLM(selected by fallback) is incorrect.")
-        return {
-            "flag": int(flag),
-            "reasons": reasons,
-            "llm_selected": llm_selected,
-            "llm_is_correct": bool(llm_is_correct)
-        }
-
-    # Gemini 호출
+    import os
     try:
         import google.generativeai as genai
-
-        api_key = st.secrets.get("GEMINI_API_KEY", "")
-        if not api_key:
-            # 키 없으면 자동 fallback
-            llm_selected = fallback_selected
-            llm_is_correct = fallback_is_correct
-            flag = 1
-            reasons.append("GEMINI_API_KEY missing; used fallback selection.")
-            return {
-                "flag": int(flag),
-                "reasons": reasons,
-                "llm_selected": llm_selected,
-                "llm_is_correct": bool(llm_is_correct)
-            }
-
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        # 모델에 “사용자처럼 풀기” + 구조화 JSON 반환 요구
-        prompt = {
-            "role": "user",
-            "parts": [f"""
-You are taking a TOEFL vocabulary quiz. Choose the best option from the given choices.
-
-Question:
-{question_text}
-
-Sentence (if any):
-{example_blank}
-
-Options:
-{json.dumps(options, ensure_ascii=False)}
-
-Return ONLY valid JSON with this schema:
-{{
-  "selected": "<one of the options exactly>",
-  "confidence": 0.0,
-  "notes": ["short reason 1", "short reason 2"]
-}}
-
-Rules:
-- "selected" MUST be exactly one of the provided options.
-- No extra text outside JSON.
-"""]
+    except Exception as e:
+        return {
+            "flag": 1,
+            "reasons": [f"google-generativeai import failed: {e}"],
+            "llm_selected": "",
+            "llm_is_correct": ""
         }
 
+    api_key = st.secrets.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return {
+            "flag": 1,
+            "reasons": ["Missing GEMINI_API_KEY in Streamlit secrets."],
+            "llm_selected": "",
+            "llm_is_correct": ""
+        }
+
+    genai.configure(api_key=api_key)
+
+    prompt = f"""
+You are taking a multiple-choice TOEFL vocabulary quiz.
+
+QUESTION:
+{question_text}
+{"SENTENCE: " + example_blank if example_blank else ""}
+
+OPTIONS:
+{json.dumps(options, ensure_ascii=False)}
+
+Pick exactly ONE option from the OPTIONS list.
+Return ONLY a JSON object with keys:
+- selected: the exact option string
+- rationale: short reason (1 sentence)
+
+Do not output anything else.
+"""
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
         resp = model.generate_content(prompt)
-        text = getattr(resp, "text", "") or ""
-        data = _extract_json(text)
+        text = resp.text.strip()
 
-        if not data or "selected" not in data:
-            # 파싱 실패 fallback
-            llm_selected = fallback_selected
-            llm_is_correct = fallback_is_correct
+        # JSON 파싱
+        data = json.loads(text)
+        selected = str(data.get("selected", "")).strip()
+        rationale = str(data.get("rationale", "")).strip()
+
+        reasons = []
+        flag = 0
+
+        if selected not in options:
             flag = 1
-            reasons.append("Gemini response parse failed; used fallback selection.")
-            return {
-                "flag": int(flag),
-                "reasons": reasons,
-                "llm_selected": llm_selected,
-                "llm_is_correct": bool(llm_is_correct)
-            }
+            reasons.append("Gemini selected an option not in the provided options.")
+            # 안전 fallback
+            selected = options[0] if options else ""
 
-        llm_selected = str(data["selected"]).strip()
-        if llm_selected not in options:
-            # 모델이 규칙 어겼으면 fallback
-            llm_selected = fallback_selected
+        is_correct = selected in set(correct_answers)
+
+        # “문제 품질” 관점 flag 규칙 (원하면 더 강화 가능)
+        # 여기서는 기본적으로 '정답이 options에 없거나' 같은 구조 오류만 flag=1
+        if not any(opt in set(correct_answers) for opt in options):
             flag = 1
-            reasons.append("Gemini selected an option not in list; used fallback selection.")
+            reasons.append("No correct answer included in options.")
 
-        llm_is_correct = bool(llm_selected in correct_answers)
-
-        # (QC 정책) LLM이 틀린 경우도 flag=1로 올리기
-        if not llm_is_correct:
+        if "Fill in the blank" in question_text and (not example_blank or example_blank.strip() == ""):
             flag = 1
-            reasons.append("Gemini selected an incorrect answer.")
+            reasons.append("Blank question has empty example_blank.")
 
-        # notes도 reasons에 붙이기(짧게)
-        notes = data.get("notes", [])
-        if isinstance(notes, list):
-            for n in notes[:3]:
-                if isinstance(n, str) and n.strip():
-                    reasons.append(f"Gemini: {n.strip()}")
+        # 참고용: Gemini가 틀렸다고 무조건 flag=1로 만들고 싶으면 아래 줄을 켜세요.
+        # if not is_correct:
+        #     flag = 1
+        #     reasons.append("Gemini answered incorrectly (may indicate confusing options).")
+
+        if rationale:
+            reasons.append(f"Gemini rationale: {rationale}")
 
         return {
             "flag": int(flag),
             "reasons": reasons,
-            "llm_selected": llm_selected,
-            "llm_is_correct": bool(llm_is_correct)
+            "llm_selected": selected,
+            "llm_is_correct": str(is_correct).upper()  # TRUE/FALSE 스타일
         }
 
     except Exception as e:
-        # 호출 실패 fallback
-        llm_selected = fallback_selected
-        llm_is_correct = fallback_is_correct
-        flag = 1
-        reasons.append(f"Gemini call failed; used fallback selection. ({type(e).__name__})")
         return {
-            "flag": int(flag),
-            "reasons": reasons,
-            "llm_selected": llm_selected,
-            "llm_is_correct": bool(llm_is_correct)
+            "flag": 1,
+            "reasons": [f"Gemini call/parsing failed: {e}"],
+            "llm_selected": "",
+            "llm_is_correct": ""
         }
+
+
 
 # =========================================================
 # 4) UI
