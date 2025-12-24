@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import datetime
 import random
-import json
 import ast
 from io import BytesIO
 from gtts import gTTS
@@ -17,6 +16,14 @@ def load_data():
     try:
         # 캐시 없이 매번 최신 데이터 로드
         df = conn.read(worksheet="Sheet1", ttl=0)
+        
+        # [수정 1] 컬럼명 대소문자 통일 (POS -> pos, WORD -> word 등)
+        # 이 한 줄 덕분에 시트에 POS라고 적혀있어도 pos로 인식합니다.
+        df.columns = df.columns.str.lower()
+        
+        # 중복 단어 제거 (혹시 모를 오류 방지)
+        df = df.drop_duplicates(subset=['word'], keep='first')
+        
         if df.empty:
             st.warning("Google Sheet is empty.")
             st.stop()
@@ -38,15 +45,18 @@ df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = 'setup'  # setup / quiz / summary
 if 'session_config' not in st.session_state:
-    st.session_state.session_config = {} # 사용자가 선택한 설정 저장
+    st.session_state.session_config = {} 
 if 'session_stats' not in st.session_state:
     st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
 if 'current_word_id' not in st.session_state:
     st.session_state.current_word_id = None
 if 'quiz_options' not in st.session_state:
     st.session_state.quiz_options = []
-if 'show_answer' not in st.session_state:
-    st.session_state.show_answer = False
+# 퀴즈 상태 관리용 변수
+if 'quiz_answered' not in st.session_state:
+    st.session_state.quiz_answered = False
+if 'selected_option' not in st.session_state:
+    st.session_state.selected_option = None
 
 # ---------------------------------------------------------
 # 2. 로직 함수
@@ -90,19 +100,14 @@ def update_srs(word_id, is_correct):
     current_box = df.at[idx, 'box']
     
     if is_correct:
-        # 정답: 통계 업데이트
         st.session_state.session_stats['correct'] += 1
-        # SRS 로직: 박스 이동
         new_box = min(current_box + 1, 5)
         days_to_add = int(2 ** new_box)
     else:
-        # 오답: 통계 업데이트
         st.session_state.session_stats['wrong'] += 1
-        # SRS 로직: 박스 0으로 초기화 (이게 곧 오답 기록입니다)
         new_box = 0
         days_to_add = 0
     
-    # 전체 진행 수 증가
     st.session_state.session_stats['total'] += 1
         
     next_date = datetime.date.today() + datetime.timedelta(days=days_to_add)
@@ -113,19 +118,13 @@ def update_srs(word_id, is_correct):
     
     # 구글 시트 저장
     conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
-    
-    # 상태 초기화
-    st.session_state.current_word_id = None
-    st.session_state.quiz_options = []
-    st.session_state.show_answer = False
-    st.toast(f"{'Correct! 🟢' if is_correct else 'Saved to Mistakes 🔴'}")
 
 # ---------------------------------------------------------
 # 3. UI 구성
 # ---------------------------------------------------------
 st.title("🎓 NicholaSOOBIN TOEFL Voca")
 
-# 사이드바는 이제 '데이터 관리' 용도로만 사용
+# 사이드바 데이터 관리
 with st.sidebar:
     st.header("Data Management")
     if st.button("Reset All Progress (Keep Words)"):
@@ -136,7 +135,6 @@ with st.sidebar:
         st.toast("DB Reset Complete!")
         st.session_state.clear()
         st.rerun()
-    st.info("Settings are now on the main screen.")
 
 # --- 화면 1: 설정 (Setup) ---
 if st.session_state.app_mode == 'setup':
@@ -147,10 +145,8 @@ if st.session_state.app_mode == 'setup':
         with c1:
             topic_list = ["All", "Science", "History", "Social Science", "Business", "Environment", "Education"]
             sel_topic = st.selectbox("Topic", topic_list)
-            
             sel_mode = st.radio("Mode", ["Standard Study (SRS)", "Review Mistakes Only"], 
                                 help="Standard: Due words | Mistakes: Only words you got wrong (Box 0)")
-            
         with c2:
             sel_goal = st.selectbox("Daily Goal", [5, 10, 15, 20, 30])
             sel_diff = st.slider("Difficulty", 1, 3, (1, 3))
@@ -158,16 +154,10 @@ if st.session_state.app_mode == 'setup':
         submitted = st.form_submit_button("🚀 Start Session", use_container_width=True)
         
         if submitted:
-            # 설정 저장
             st.session_state.session_config = {
-                'topic': sel_topic,
-                'goal': sel_goal,
-                'difficulty': sel_diff,
-                'mode': sel_mode
+                'topic': sel_topic, 'goal': sel_goal, 'difficulty': sel_diff, 'mode': sel_mode
             }
-            # 통계 초기화
             st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
-            # 퀴즈 모드로 전환
             st.session_state.app_mode = 'quiz'
             st.rerun()
 
@@ -176,7 +166,7 @@ elif st.session_state.app_mode == 'quiz':
     config = st.session_state.session_config
     stats = st.session_state.session_stats
     
-    # 상단 진행바
+    # 진행바
     goal = config['goal']
     current = stats['total']
     st.progress(min(current / goal, 1.0))
@@ -187,196 +177,154 @@ elif st.session_state.app_mode == 'quiz':
         st.session_state.app_mode = 'summary'
         st.rerun()
 
-    # # 문제 로딩
-    # if st.session_state.current_word_id is None:
-    #     new_id = get_next_word()
-    #     if new_id is not None:
-    #         st.session_state.current_word_id = new_id
-            
-    #         # 보기 생성 로직
-    #         current_word = st.session_state.vocab_db[st.session_state.vocab_db['id'] == new_id].iloc[0]
-    #         synonyms = current_word['synonyms']
-    #         if isinstance(synonyms, str):
-    #             try: synonyms = ast.literal_eval(synonyms)
-    #             except: synonyms = [synonyms]
-                
-    #         options = synonyms[:]
-            
-    #         # 오답 풀 만들기
-    #         wrong_pool = []
-    #         other_words = st.session_state.vocab_db[st.session_state.vocab_db['id'] != new_id]
-    #         for syn_list in other_words['synonyms']:
-    #             if isinstance(syn_list, str):
-    #                 try: syn_list = ast.literal_eval(syn_list)
-    #                 except: continue
-    #             if isinstance(syn_list, list):
-    #                 wrong_pool.extend(syn_list)
-            
-    #         if len(wrong_pool) >= 3:
-    #             wrong_options = random.sample(wrong_pool, 2)
-    #             options = [options[0]] + wrong_options
-    #             random.shuffle(options)
-    #         else:
-    #             options = options + ["Similar A", "Similar B"][:3]
-                
-    #         st.session_state.quiz_options = options
-    #     else:
-    #         st.warning("No words found matching your criteria!")
-    #         if st.button("Back to Home"):
-    #             st.session_state.app_mode = 'setup'
-    #             st.rerun()
-    #         st.stop()
+    # 데이터프레임 확보
+    df = st.session_state.vocab_db
 
     # -------------------------------------------------------
-    # 문제 로딩 로직 (엄격한 품사 필터링 O, 단어 형태 제한 X)
+    # 문제 로딩 로직 (엄격한 품사 필터링 + 보기 생성)
     # -------------------------------------------------------
     if st.session_state.current_word_id is None:
         new_id = get_next_word()
         if new_id is not None:
             st.session_state.current_word_id = new_id
             
-            # 1. 현재 문제 단어 정보 가져오기
-            df = st.session_state.vocab_db
             current_word = df[df['id'] == new_id].iloc[0]
             
-            # 정답 보기 파싱
+            # 정답 파싱
             synonyms = current_word['synonyms']
             if isinstance(synonyms, str):
                 try: synonyms = ast.literal_eval(synonyms)
                 except: synonyms = [synonyms]
             
-            correct_option = synonyms[0] 
+            correct_option = synonyms[0]
             options = [correct_option]
             
-            # 2. 오답 풀(Pool) 만들기 전략
-            # 품사 정보 가져오기 (소문자로 변환하여 비교)
+            # [오답 보기 추출]
+            # 1. 타겟 품사 확인
             target_pos = str(current_word.get('pos', '')).strip().lower()
             
-            # 비교를 위해 DB의 pos 컬럼도 소문자로 변환한 임시 컬럼 생성
+            # 2. 비교용 임시 컬럼 생성 (품사 필터링용)
             df_pool = df.copy()
             df_pool['pos_norm'] = df_pool['pos'].fillna('').astype(str).str.strip().str.lower()
             
-            # [품사 필터링 로직]
-            # 품사 정보가 있고 유효하다면, 무조건 같은 품사 내에서만 찾습니다.
+            # 3. 같은 품사 필터링 (엄격 모드)
             if target_pos and target_pos != 'nan' and target_pos != '':
                 candidate_df = df_pool[(df_pool['pos_norm'] == target_pos) & (df_pool['id'] != new_id)]
-                
-                # 만약 같은 품사 단어가 하나도 없으면 에러 방지를 위해 전체 개방
                 if candidate_df.empty:
                     candidate_df = df_pool[df_pool['id'] != new_id]
             else:
-                # 품사 정보가 없는 경우 전체 개방
                 candidate_df = df_pool[df_pool['id'] != new_id]
 
-            # 3. 오답 추출 및 정제
+            # 4. 오답 풀 수집
             wrong_pool = []
             for syn_list in candidate_df['synonyms']:
                 if isinstance(syn_list, str):
                     try: syn_list = ast.literal_eval(syn_list)
                     except: continue
                 if isinstance(syn_list, list):
-                    # [수정됨] 공백 체크(is_single_word) 로직 제거
-                    # 품사만 맞다면 숙어(phrase)도 그대로 후보에 넣습니다.
                     for w in syn_list:
                         wrong_pool.append(w)
             
-            # 중복 제거 및 정답 제거
+            # 5. 정제 및 선택
             wrong_pool = list(set(wrong_pool))
             wrong_pool = [w for w in wrong_pool if w not in synonyms]
             
-            # 4. 오답 3개 뽑기
             needed = 3
             if len(wrong_pool) >= needed:
                 wrong_options = random.sample(wrong_pool, needed)
             else:
-                # 후보가 부족하면 있는 것 다 쓰고 나머지는 더미로 채움
                 defaults = ["Option A", "Option B", "Option C"]
                 wrong_options = wrong_pool + defaults[:needed - len(wrong_pool)]
             
-            # 5. 합치기 및 섞기
             options = options + wrong_options
             random.shuffle(options)
             
             st.session_state.quiz_options = options
             
+            # 문제 로딩 시 상태 초기화
+            st.session_state.quiz_answered = False
+            st.session_state.selected_option = None
+            
         else:
             st.warning("No words found matching your criteria!")
-            if st.button("Back to Home"):
+            if st.button("Back to Setup"):
                 st.session_state.app_mode = 'setup'
                 st.rerun()
             st.stop()
-            
-    # UI 렌더링
-    word_id = st.session_state.current_word_id
-    row = st.session_state.vocab_db[st.session_state.vocab_db['id'] == word_id].iloc[0]
 
-    st.markdown(f"""
-    <div style="padding: 30px; border-radius: 15px; background-color: #f0f2f6; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <p style="color: grey; margin-bottom: 5px;">{row['topic']} | Level {row['level']}</p>
-        <h1 style="color: #2c3e50; font-size: 3.5em; margin: 0;">{row['word']}</h1>
-    </div>
-    """, unsafe_allow_html=True)
+    # -------------------------------------------------------
+    # UI 구성 (문제 표시 -> 버튼 -> 결과 및 해설)
+    # -------------------------------------------------------
+    current_id = st.session_state.current_word_id
+    current_word_row = df[df['id'] == current_id].iloc[0]
+    
+    correct_synonyms = current_word_row['synonyms']
+    if isinstance(correct_synonyms, str):
+        try: correct_synonyms = ast.literal_eval(correct_synonyms)
+        except: correct_synonyms = [correct_synonyms]
 
-    # 발음 듣기
+    # 문제 화면 출력
+    st.markdown(f"### What is a synonym for: **{current_word_row['word']}**?")
+    
+    # 발음 듣기 (옵션)
     try:
         sound_file = BytesIO()
-        tts = gTTS(text=row['word'], lang='en')
+        tts = gTTS(text=current_word_row['word'], lang='en')
         tts.write_to_fp(sound_file)
         sound_file.seek(0)
         st.audio(sound_file, format='audio/mpeg')
     except:
-        st.caption("Voice unavailable")
+        pass
 
-    tab1, tab2 = st.tabs(["📖 Flashcard", "🧩 Synonym Quiz"])
-
-    with tab1:
-        syn_disp = row['synonyms']
-        if isinstance(syn_disp, str):
-            try: syn_disp = ast.literal_eval(syn_disp)
-            except: syn_disp = [syn_disp]
-
-        if not st.session_state.show_answer:
-            if st.button("🔍 Show Definition", use_container_width=True):
-                st.session_state.show_answer = True
+    st.caption(f"Part of Speech: *{current_word_row['pos']}*")
+    
+    # [A] 답변 전: 보기 버튼 표시
+    if not st.session_state.quiz_answered:
+        cols = st.columns(2)
+        for i, option in enumerate(st.session_state.quiz_options):
+            if cols[i % 2].button(option, key=f"btn_{i}", use_container_width=True):
+                st.session_state.quiz_answered = True
+                st.session_state.selected_option = option
+                
+                # 정답 처리 및 SRS 업데이트
+                is_correct = option in correct_synonyms
+                update_srs(current_id, is_correct)
                 st.rerun()
-        else:
-            st.info(f"**Definition:** {row['definition']}")
-            st.caption(f"**Example:** {row['example']}")
-            st.write(f"**Synonyms:** {', '.join(syn_disp)}")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("❌ Don't Know", use_container_width=True):
-                    update_srs(word_id, False)
-                    st.rerun()
-            with c2:
-                if st.button("✅ Know", use_container_width=True):
-                    update_srs(word_id, True)
-                    st.rerun()
 
-    with tab2:
-        st.write(f"Select the synonym for **'{row['word']}'**")
-        syn_check = row['synonyms']
-        if isinstance(syn_check, str):
-            try: syn_check = ast.literal_eval(syn_check)
-            except: syn_check = [syn_check]
-
-        with st.form("quiz_form"):
-            choice = st.radio("Options:", st.session_state.quiz_options)
-            if st.form_submit_button("Submit Answer"):
-                if choice in syn_check:
-                    st.success("Correct!")
-                    st.session_state.lqr = True
-                else:
-                    st.error(f"Wrong! The answer is {', '.join(syn_check)}")
-                    st.session_state.lqr = False
+    # [B] 답변 후: 결과 및 상세 해설 표시
+    else:
+        selected = st.session_state.selected_option
+        is_correct = selected in correct_synonyms
         
-        if 'lqr' in st.session_state:
-            if st.button("Next Word ➡️", type="primary"):
-                res = st.session_state.lqr
-                del st.session_state['lqr']
-                update_srs(word_id, res)
-                st.rerun()
+        # 보기 목록 중에서 실제 정답 단어 찾기
+        answer_in_options = [opt for opt in st.session_state.quiz_options if opt in correct_synonyms]
+        if answer_in_options:
+            final_answer_text = answer_in_options[0]
+        else:
+            final_answer_text = correct_synonyms[0]
+
+        # 1. 정답 여부 메시지
+        if is_correct:
+            st.success(f"✅ Correct! **'{selected}'** is a synonym for **'{current_word_row['word']}'**.")
+        else:
+            # 틀렸을 때: 여러 개 나열하지 않고 보기 중 정답만 표시
+            st.error(f"❌ Incorrect. The answer is **'{final_answer_text}'**.")
+
+        # 2. 제시어(Target Word) 상세 정보 (정의 및 예문)
+        st.markdown("---")
+        st.markdown(f"#### 📖 Study: **{current_word_row['word']}**")
+        
+        st.info(
+            f"**Definition:** {current_word_row['definition']}\n\n"
+            f"**Example:** *{current_word_row['example']}*"
+        )
+
+        # 3. 다음 문제 버튼
+        if st.button("Next Question ➡️", type="primary"):
+            st.session_state.current_word_id = None
+            st.session_state.quiz_answered = False
+            st.session_state.selected_option = None
+            st.rerun()
 
 # --- 화면 3: 결과 요약 (Summary) ---
 elif st.session_state.app_mode == 'summary':
