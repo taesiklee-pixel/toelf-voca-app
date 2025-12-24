@@ -17,22 +17,44 @@ def load_data():
         # 캐시 없이 매번 최신 데이터 로드
         df = conn.read(worksheet="Sheet1", ttl=0)
         
-        # 1. 컬럼명 소문자 통일 (POS -> pos 등)
+        # 1. 컬럼명 소문자 통일
         df.columns = df.columns.str.lower()
         
         # 2. 중복 단어 제거
         df = df.drop_duplicates(subset=['word'], keep='first')
         
-        # 3. [NEW] 오답 횟수(mistake_count) 컬럼이 없으면 생성 및 0으로 초기화
+        # 3. [핵심 수정] 컬럼 구조 동기화 체크
+        needs_initial_save = False
+        
+        # mistake_count 없으면 생성
         if 'mistake_count' not in df.columns:
             df['mistake_count'] = 0
-        
-        # NaN 값을 0으로 채우기 (기존 데이터 호환성)
+            needs_initial_save = True
+            
+        # box 없으면 생성
+        if 'box' not in df.columns:
+            df['box'] = 0
+            needs_initial_save = True
+
+        # next_review 없으면 생성
+        if 'next_review' not in df.columns:
+            df['next_review'] = '0000-00-00'
+            needs_initial_save = True
+
+        # 데이터 타입 정리 (NaN 방지)
         df['mistake_count'] = df['mistake_count'].fillna(0).astype(int)
+        df['box'] = df['box'].fillna(0).astype(int)
+        df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
+
+        # [중요] 컬럼을 새로 만들었으면 시트에도 즉시 반영하여 헤더를 생성함
+        if needs_initial_save:
+            conn.update(worksheet="Sheet1", data=df)
+            st.toast("Updated Google Sheet structure (added columns).")
 
         if df.empty:
             st.warning("Google Sheet is empty.")
             st.stop()
+            
         return df
     except Exception as e:
         st.error(f"Google Sheet Connection Error: {e}")
@@ -41,18 +63,8 @@ def load_data():
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
 
-# 데이터 전처리
+# 데이터 전처리 (세션용)
 df = st.session_state.vocab_db
-
-# next_review 날짜 처리
-if 'next_review' not in df.columns:
-    df['next_review'] = None
-df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
-
-# box 처리
-if 'box' not in df.columns:
-    df['box'] = 0
-df['box'] = df['box'].fillna(0).astype(int)
 
 # --- [앱 상태 관리 변수들] ---
 if 'app_mode' not in st.session_state:
@@ -86,20 +98,17 @@ def get_next_word():
     if topic != "All":
         mask = mask & (df['topic'] == topic)
         
-    # 3. 모드별 필터 (일반 vs 오답노트)
+    # 3. 모드별 필터
     mode = config.get('mode', 'Standard Study')
     today_str = str(datetime.date.today())
     
     if mode == 'Review Mistakes Only':
-        # [수정된 로직] 오답 노트: 
-        # Box가 0이면서(초기화됨) AND 오답 횟수(mistake_count)가 1 이상인 것
-        # 이렇게 하면 '아직 안 푼 새 단어(count 0)'는 제외됩니다.
+        # 오답 노트: Box가 0이면서 AND 오답 횟수가 1 이상인 것
         logic_mask = (df['box'] == 0) & (df['mistake_count'] > 0)
         
-        # 만약 틀린 단어가 하나도 없다면?
+        # 틀린 단어가 없으면 안내 후 일반 모드로 전환 고려 (여기선 토스트만)
         if df[mask & logic_mask].empty:
-            st.toast("No mistakes found! Switching to Standard mode.")
-            logic_mask = df['next_review'] <= today_str
+            st.toast("No historical mistakes found! (Box 0 & Count > 0)")
             
     else:
         # 일반 모드: 오늘 복습해야 할 단어 OR 아직 안 본 단어
@@ -116,22 +125,25 @@ def get_next_word():
 
 def update_srs(word_id, is_correct):
     df = st.session_state.vocab_db
-    idx = df[df['id'] == word_id].index[0]
-    current_box = df.at[idx, 'box']
+    # id로 인덱스 찾기
+    idx_list = df[df['id'] == word_id].index.tolist()
+    if not idx_list:
+        return # 에러 방지
+    idx = idx_list[0]
     
-    # mistake_count 가져오기 (없으면 0)
-    current_mistakes = df.at[idx, 'mistake_count'] if 'mistake_count' in df.columns else 0
+    current_box = int(df.at[idx, 'box'])
+    current_mistakes = int(df.at[idx, 'mistake_count'])
     
     if is_correct:
         st.session_state.session_stats['correct'] += 1
         new_box = min(current_box + 1, 5)
         days_to_add = int(2 ** new_box)
-        new_mistakes = current_mistakes # 맞았으면 오답 수 유지
+        new_mistakes = current_mistakes # 정답이면 유지
     else:
         st.session_state.session_stats['wrong'] += 1
         new_box = 0 # 박스 초기화
         days_to_add = 0
-        new_mistakes = current_mistakes + 1 # [NEW] 오답 횟수 증가
+        new_mistakes = current_mistakes + 1 # 오답 횟수 증가
     
     st.session_state.session_stats['total'] += 1
         
@@ -143,7 +155,11 @@ def update_srs(word_id, is_correct):
     st.session_state.vocab_db.at[idx, 'mistake_count'] = new_mistakes
     
     # 구글 시트 저장
-    conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
+    try:
+        conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
+        # st.toast("Progress saved to Sheet.") # 디버깅용 메시지
+    except Exception as e:
+        st.error(f"Save failed: {e}")
 
 # ---------------------------------------------------------
 # 3. UI 구성
@@ -157,7 +173,7 @@ with st.sidebar:
         df_reset = st.session_state.vocab_db.copy()
         df_reset['box'] = 0
         df_reset['next_review'] = '0000-00-00'
-        df_reset['mistake_count'] = 0 # 리셋 시 오답 기록도 초기화
+        df_reset['mistake_count'] = 0 
         conn.update(worksheet="Sheet1", data=df_reset)
         st.toast("All progress has been reset.")
         st.session_state.clear()
@@ -172,9 +188,8 @@ if st.session_state.app_mode == 'setup':
         with c1:
             topic_list = ["All", "Science", "History", "Social Science", "Business", "Environment", "Education"]
             sel_topic = st.selectbox("Topic", topic_list)
-            # 모드 설명 업데이트
             sel_mode = st.radio("Mode", ["Standard Study (SRS)", "Review Mistakes Only"], 
-                                help="Standard: New & Due words | Mistakes: Only words you got wrong before")
+                                help="Standard: New & Due words | Mistakes: Words you got wrong before")
         with c2:
             sel_goal = st.selectbox("Daily Goal", [5, 10, 15, 20, 30])
             sel_diff = st.slider("Difficulty", 1, 3, (1, 3))
@@ -273,7 +288,7 @@ elif st.session_state.app_mode == 'quiz':
         else:
             st.warning("No words matching your criteria!")
             if config['mode'] == 'Review Mistakes Only':
-                st.info("💡 You have no mistakes recorded yet! Try 'Standard Study' first.")
+                st.info("💡 You have no recorded mistakes yet! (Or you've finished reviewing them). Try 'Standard Study'.")
             if st.button("Back to Setup"):
                 st.session_state.app_mode = 'setup'
                 st.rerun()
