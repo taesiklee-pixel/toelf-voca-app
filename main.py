@@ -626,7 +626,7 @@ with st.sidebar:
     try:
         import google.generativeai as genai
             st.success("google-generativeai import OK ✅")
-        except Exception as e:
+    except Exception as e:
             st.error(f"Import failed ❌: {type(e).__name__} - {e}")
 
     if st.button("Gemini Health Check"):
