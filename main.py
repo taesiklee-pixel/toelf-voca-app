@@ -629,6 +629,21 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Import failed ❌: {type(e).__name__} - {e}")
 
+    if st.button("Gemini Health Check"):
+    try:
+        import google.generativeai as genai
+        key = st.secrets.get("GEMINI_API_KEY", "")
+        if not key:
+            st.error("❌ GEMINI_API_KEY not found in st.secrets")
+        else:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            r = model.generate_content("Say OK")
+            st.success("✅ Gemini call OK")
+            st.write(r.text)
+    except Exception as e:
+        st.error(f"❌ Gemini error: {type(e).__name__} - {e}")
+
     if st.button("Run QC Simulation"):
         ok = ensure_qc_sheet_and_header()
         if not ok:
