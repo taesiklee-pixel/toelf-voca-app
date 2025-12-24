@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 import pandas as pd
 import datetime
@@ -9,43 +8,41 @@ from io import BytesIO
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
-# ---- [NEW] Gemini SDK ----
-from google import genai
+# =========================================================
+# 0) Config
+# =========================================================
+SHEET_MAIN = "Sheet1"
+QC_SHEET = "QC_Log"
+
+QC_COLUMNS = [
+    "ts", "session_id", "word_id", "word", "qtype", "question_text", "example_blank",
+    "options", "correct_answers", "llm_selected", "llm_is_correct", "flag", "reasons"
+]
 
 # =========================================================
-# 0. Gemini Client
-# =========================================================
-def get_gemini_client():
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        st.error("Missing GEMINI_API_KEY env var. Please set it before running.")
-        st.stop()
-    return genai.Client(api_key=api_key)
-
-# =========================================================
-# 1. 데이터 및 세션 초기화
+# 1) 데이터 및 세션 초기화
 # =========================================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
     try:
-        df = conn.read(worksheet="Sheet1", ttl=0)
+        df = conn.read(worksheet=SHEET_MAIN, ttl=0)
         df.columns = df.columns.str.lower()
-        df = df.drop_duplicates(subset=['word'], keep='first')
 
+        # 중복 단어 제거
+        if 'word' in df.columns:
+            df = df.drop_duplicates(subset=['word'], keep='first')
+
+        # 컬럼 구조 동기화 체크
         needs_initial_save = False
 
-        if 'mistake_count' not in df.columns:
-            df['mistake_count'] = 0
-            needs_initial_save = True
-
-        if 'box' not in df.columns:
-            df['box'] = 0
-            needs_initial_save = True
-
-        if 'next_review' not in df.columns:
-            df['next_review'] = '0000-00-00'
-            needs_initial_save = True
+        for col in ['mistake_count', 'box', 'next_review']:
+            if col not in df.columns:
+                if col in ['mistake_count', 'box']:
+                    df[col] = 0
+                else:
+                    df[col] = '0000-00-00'
+                needs_initial_save = True
 
         # MCQ용 컬럼
         for col in ['example_blank', 'collocations', 'confusables']:
@@ -53,12 +50,18 @@ def load_data():
                 df[col] = ''
                 needs_initial_save = True
 
+        # 타입 정리
         df['mistake_count'] = df['mistake_count'].fillna(0).astype(int)
         df['box'] = df['box'].fillna(0).astype(int)
         df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
 
+        # id 컬럼은 있어야 동작(필수)
+        if 'id' not in df.columns:
+            st.error("ERROR: 'id' column not found in Sheet1.")
+            st.stop()
+
         if needs_initial_save:
-            conn.update(worksheet="Sheet1", data=df)
+            conn.update(worksheet=SHEET_MAIN, data=df)
             st.toast("Updated Google Sheet structure (added columns).")
 
         if df.empty:
@@ -70,34 +73,55 @@ def load_data():
         st.error(f"Google Sheet Connection Error: {e}")
         st.stop()
 
-# ---- [NEW] QC Log sheet helper ----
-QC_SHEET = "QC_Log"
-
-def ensure_qc_sheet():
-    # streamlit_gsheets는 worksheet 자동생성 지원이 환경마다 다를 수 있어서
-    # 여기서는 "읽기 시도 -> 실패하면 사용자에게 생성 요청" 방식으로 처리합니다.
+# ---- [NEW] QC_Log 워크시트 헤더 보장 ----
+def ensure_qc_sheet_and_header():
+    """
+    QC_Log 워크시트가 있고, 최소한 헤더(row1)가 존재하도록 보장.
+    (워크시트가 아예 없으면 streamlit_gsheets 환경에 따라 자동 생성이 안 될 수 있어 안내만 함)
+    """
     try:
-        _ = conn.read(worksheet=QC_SHEET, ttl=0)
+        df_old = conn.read(worksheet=QC_SHEET, ttl=0)
+        if df_old is None or df_old.empty:
+            df_init = pd.DataFrame(columns=QC_COLUMNS)
+            conn.update(worksheet=QC_SHEET, data=df_init)
+        else:
+            df_old.columns = df_old.columns.str.lower()
+            missing = [c for c in QC_COLUMNS if c not in df_old.columns]
+            if missing:
+                for c in missing:
+                    df_old[c] = ""
+                df_old = df_old[QC_COLUMNS]
+                conn.update(worksheet=QC_SHEET, data=df_old)
         return True
     except Exception:
         st.warning(f"Worksheet '{QC_SHEET}' not found. Please create it in Google Sheet.")
-        st.info("Recommended headers: ts, session_id, word_id, word, qtype, question_text, example_blank, options, correct_answers, llm_selected, llm_is_correct, flag, reasons")
+        st.info("Create QC_Log worksheet tab, then rerun. Headers will be auto-initialized.")
         return False
 
 def append_qc_log(rows: list[dict]):
-    """
-    rows: list of dicts
-    """
-    if not ensure_qc_sheet():
+    if not rows:
         return
+    if not ensure_qc_sheet_and_header():
+        return
+
     try:
-        old = conn.read(worksheet=QC_SHEET, ttl=0)
-        old.columns = old.columns.str.lower()
+        df_old = conn.read(worksheet=QC_SHEET, ttl=0)
+        df_old.columns = df_old.columns.str.lower()
 
-        new_df = pd.DataFrame(rows)
-        new_df.columns = new_df.columns.str.lower()
+        df_new = pd.DataFrame(rows)
+        df_new.columns = df_new.columns.str.lower()
 
-        merged = pd.concat([old, new_df], ignore_index=True)
+        # 컬럼 보정
+        for c in QC_COLUMNS:
+            if c not in df_old.columns:
+                df_old[c] = ""
+            if c not in df_new.columns:
+                df_new[c] = ""
+
+        df_old = df_old[QC_COLUMNS]
+        df_new = df_new[QC_COLUMNS]
+
+        merged = pd.concat([df_old, df_new], ignore_index=True)
         conn.update(worksheet=QC_SHEET, data=merged)
     except Exception as e:
         st.error(f"QC_Log append failed: {e}")
@@ -107,7 +131,7 @@ if 'vocab_db' not in st.session_state:
 
 df = st.session_state.vocab_db
 
-# --- 앱 상태 ---
+# --- 앱 상태 변수 ---
 if 'app_mode' not in st.session_state:
     st.session_state.app_mode = 'setup'
 if 'session_config' not in st.session_state:
@@ -123,6 +147,7 @@ if 'quiz_answered' not in st.session_state:
 if 'selected_option' not in st.session_state:
     st.session_state.selected_option = None
 
+# 문제 타입/정답/문항 텍스트 상태
 if 'question_type' not in st.session_state:
     st.session_state.question_type = None  # 'synonym' or 'blank'
 if 'correct_answers' not in st.session_state:
@@ -133,21 +158,8 @@ if 'example_blank_to_show' not in st.session_state:
     st.session_state.example_blank_to_show = ""
 
 # =========================================================
-# 2. 로직 함수
+# 2) 로직 함수
 # =========================================================
-def parse_list(x):
-    if isinstance(x, list):
-        return x
-    if isinstance(x, str) and x.strip() != "":
-        try:
-            v = ast.literal_eval(x)
-            if isinstance(v, list):
-                return v
-            return [str(v)]
-        except:
-            return [x]
-    return []
-
 def get_next_word():
     df = st.session_state.vocab_db
     config = st.session_state.session_config
@@ -205,11 +217,32 @@ def update_srs(word_id, is_correct):
     st.session_state.vocab_db.at[idx, 'mistake_count'] = new_mistakes
 
     try:
-        conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
+        conn.update(worksheet=SHEET_MAIN, data=st.session_state.vocab_db)
     except Exception as e:
         st.error(f"Save failed: {e}")
 
+def parse_list(x):
+    if isinstance(x, list):
+        return x
+    if isinstance(x, str) and x.strip() != "":
+        try:
+            v = ast.literal_eval(x)
+            if isinstance(v, list):
+                return v
+            return [str(v)]
+        except:
+            return [x]
+    return []
+
 def build_question_for_word(word_row, df_all):
+    """
+    Returns:
+      question_type: 'synonym' or 'blank'
+      question_text: markdown
+      options: list[str]
+      correct_answers: set[str]
+      extra_display: dict
+    """
     new_id = int(word_row['id'])
     word_text = str(word_row.get('word', '')).strip()
     target_pos = str(word_row.get('pos', '')).strip().lower()
@@ -225,7 +258,7 @@ def build_question_for_word(word_row, df_all):
     df_pool = df_all.copy()
     df_pool['pos_norm'] = df_pool['pos'].fillna('').astype(str).str.strip().str.lower()
 
-    # Synonym
+    # [A] Synonym
     if qtype == 'synonym':
         synonyms = parse_list(word_row.get('synonyms', ''))
         synonyms = [s for s in synonyms if isinstance(s, str) and s.strip() != ""]
@@ -265,9 +298,10 @@ def build_question_for_word(word_row, df_all):
 
             options += wrong_options
             random.shuffle(options)
+
             return qtype, question_text, options, correct_set, {'example_blank': ''}
 
-    # Blank MCQ
+    # [B] Blank MCQ
     question_text = "### Fill in the blank with the best word:"
     correct_set = set([word_text])
 
@@ -307,120 +341,37 @@ def build_question_for_word(word_row, df_all):
     return 'blank', question_text, options, correct_set, {'example_blank': example_blank}
 
 # =========================================================
-# 3. Gemini QC
+# 3) (선택) Gemini QC Stub
+#    - 여기서는 "flag=1/0" 판단만 예시로 넣어둡니다.
+#    - 실제 Gemini API 호출은 사용자 환경에 맞게 교체하세요.
 # =========================================================
-def gemini_qc_solve_and_flag(client, payload: dict, model="gemini-1.5-flash"):
+def gemini_qc_stub(question_text, example_blank, options, correct_answers):
     """
-    payload keys:
-      word, qtype, question_text, example_blank, options(list), correct_answers(list), pos, topic
-    Returns dict:
-      selected_option, flag(0/1), reasons(list[str])
+    TODO: 실제 Gemini API로 교체.
+    지금은 단순 휴리스틱으로 "이상 가능성"을 잡는 예시.
     """
-    schema = {
-        "type": "object",
-        "properties": {
-            "selected_option": {"type": "string"},
-            "flag": {"type": "integer", "enum": [0, 1]},
-            "reasons": {"type": "array", "items": {"type": "string"}}
-        },
-        "required": ["selected_option", "flag", "reasons"]
+    reasons = []
+    flag = 0
+
+    # 보기 중 정답이 아예 없으면 문제
+    if not any(opt in correct_answers for opt in options):
+        flag = 1
+        reasons.append("No correct answer included in options.")
+
+    # blank 문제인데 example_blank가 비어있으면 문제
+    if "Fill in the blank" in question_text and (not example_blank or example_blank.strip() == ""):
+        flag = 1
+        reasons.append("Blank question has empty example_blank.")
+
+    return {
+        "flag": flag,
+        "reasons": reasons,
+        "llm_selected": "",
+        "llm_is_correct": ""
     }
 
-    prompt = f"""
-You are a QA tester acting as a student using a TOEFL vocabulary quiz app.
-
-Task:
-1) Choose the best answer from the given options (like a real user would).
-2) Evaluate the question quality and set flag=1 if anything is problematic.
-
-Flag if you see issues such as:
-- Placeholder options (e.g., "Option A/B/C") or nonsense distractors
-- Distractors totally unrelated in meaning or wrong POS for synonym question
-- Multiple correct answers but only one is accepted OR ambiguous correct choice
-- Blank sentence doesn't fit any option naturally or requires grammar change
-- Confusables are missing and distractors are too random
-
-Return JSON only.
-
-INPUT:
-{json.dumps(payload, ensure_ascii=False)}
-""".strip()
-
-    # Structured output with schema (Google Gen AI SDK supports response_mime_type + response_json_schema in examples)
-    # See Google docs for structured output guidance. :contentReference[oaicite:2]{index=2}
-    try:
-        resp = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_json_schema": schema,
-            },
-        )
-        text = resp.text.strip()
-        return json.loads(text)
-    except Exception as e:
-        # Fallback: try to parse raw text as JSON
-        try:
-            return json.loads(resp.text)
-        except Exception:
-            return {"selected_option": "", "flag": 1, "reasons": [f"Gemini call/parse failed: {e}"]}
-
-def run_gemini_qc_simulation(n=100, model="gemini-1.5-flash"):
-    client = get_gemini_client()
-    df_all = st.session_state.vocab_db
-
-    session_id = f"qc_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    logs = []
-
-    for _ in range(n):
-        # 세션 설정 기반 후보에서 1개 선택 (현재 세션_config가 없으면 전체에서)
-        # QC는 폭넓게 보기 위해 여기서는 전체 due 단어에서 랜덤 선택.
-        # 원하면 get_next_word()를 그대로 써도 됩니다.
-        row = df_all.sample(1).iloc[0]
-        qtype, qtext, options, correct_set, extra = build_question_for_word(row, df_all)
-
-        payload = {
-            "word": str(row.get("word","")),
-            "qtype": qtype,
-            "question_text": qtext,
-            "example_blank": extra.get("example_blank",""),
-            "options": options,
-            "correct_answers": sorted(list(correct_set)),
-            "pos": str(row.get("pos","")),
-            "topic": str(row.get("topic","")),
-        }
-
-        out = gemini_qc_solve_and_flag(client, payload, model=model)
-        selected = out.get("selected_option","")
-        flag = int(out.get("flag", 1))
-        reasons = out.get("reasons", [])
-        if not isinstance(reasons, list):
-            reasons = [str(reasons)]
-
-        llm_is_correct = (selected in correct_set)
-
-        logs.append({
-            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "session_id": session_id,
-            "word_id": int(row.get("id", -1)),
-            "word": str(row.get("word","")),
-            "qtype": qtype,
-            "question_text": qtext,
-            "example_blank": extra.get("example_blank",""),
-            "options": json.dumps(options, ensure_ascii=False),
-            "correct_answers": json.dumps(sorted(list(correct_set)), ensure_ascii=False),
-            "llm_selected": selected,
-            "llm_is_correct": int(llm_is_correct),
-            "flag": flag,
-            "reasons": json.dumps(reasons, ensure_ascii=False),
-        })
-
-    append_qc_log(logs)
-    return logs
-
 # =========================================================
-# 4. UI
+# 4) UI
 # =========================================================
 st.title("🎓 NicholaSOOBIN TOEFL Voca")
 
@@ -431,22 +382,58 @@ with st.sidebar:
         df_reset['box'] = 0
         df_reset['next_review'] = '0000-00-00'
         df_reset['mistake_count'] = 0
-        conn.update(worksheet="Sheet1", data=df_reset)
+        conn.update(worksheet=SHEET_MAIN, data=df_reset)
         st.toast("All progress has been reset.")
         st.session_state.clear()
         st.rerun()
 
     st.divider()
-    st.header("LLM QC (Gemini)")
-    qc_n = st.number_input("Simulate N questions", min_value=10, max_value=2000, value=200, step=10)
-    qc_model = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    st.header("QC (Gemini)")
 
-    if st.button("Run Gemini QC (simulate)", use_container_width=True):
-        logs = run_gemini_qc_simulation(n=int(qc_n), model=qc_model)
-        flagged = sum(int(x["flag"]) for x in logs)
-        st.success(f"QC complete. Flagged: {flagged} / {len(logs)}")
-        if flagged > 0:
-            st.info("Check the 'QC_Log' worksheet for details (reasons).")
+    sim_n = st.number_input("Simulate N questions", min_value=1, max_value=2000, value=100, step=50)
+
+    if st.button("Run QC Simulation (Stub)"):
+        ok = ensure_qc_sheet_and_header()
+        if not ok:
+            st.stop()
+
+        df_all = st.session_state.vocab_db
+        session_id = random.randint(10, 10_000)
+
+        logs = []
+        flagged = 0
+
+        # 후보를 넉넉히 섞어서 sim_n만큼
+        sampled = df_all.sample(min(sim_n, len(df_all))).to_dict("records")
+
+        for row in sampled:
+            qtype, qtext, options, correct_set, extra = build_question_for_word(row, df_all)
+            ex_blank = extra.get("example_blank", "")
+
+            qc = gemini_qc_stub(qtext, ex_blank, options, correct_set)
+
+            if qc["flag"] == 1:
+                flagged += 1
+
+            logs.append({
+                "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "session_id": session_id,
+                "word_id": int(row.get("id")),
+                "word": str(row.get("word", "")),
+                "qtype": qtype,
+                "question_text": qtext,
+                "example_blank": ex_blank,
+                "options": json.dumps(options, ensure_ascii=False),
+                "correct_answers": json.dumps(sorted(list(correct_set)), ensure_ascii=False),
+                "llm_selected": qc.get("llm_selected", ""),
+                "llm_is_correct": qc.get("llm_is_correct", ""),
+                "flag": int(qc["flag"]),
+                "reasons": json.dumps(qc.get("reasons", []), ensure_ascii=False),
+            })
+
+        append_qc_log(logs)
+        st.success(f"QC done. Flagged: {flagged} / {len(logs)} (session_id={session_id})")
+        st.caption("Check Google Sheet → QC_Log tab.")
 
 # --- 화면 1: 설정 ---
 if st.session_state.app_mode == 'setup':
@@ -493,15 +480,16 @@ elif st.session_state.app_mode == 'quiz':
         st.session_state.app_mode = 'summary'
         st.rerun()
 
-    df = st.session_state.vocab_db
+    df_all = st.session_state.vocab_db
 
+    # 문제 로딩
     if st.session_state.current_word_id is None:
         new_id = get_next_word()
         if new_id is not None:
             st.session_state.current_word_id = new_id
-            current_word = df[df['id'] == new_id].iloc[0]
+            current_word = df_all[df_all['id'] == new_id].iloc[0]
 
-            qtype, qtext, options, correct_set, extra = build_question_for_word(current_word, df)
+            qtype, qtext, options, correct_set, extra = build_question_for_word(current_word, df_all)
 
             st.session_state.question_type = qtype
             st.session_state.question_text = qtext
@@ -521,16 +509,19 @@ elif st.session_state.app_mode == 'quiz':
             st.stop()
 
     current_id = st.session_state.current_word_id
-    current_word_row = df[df['id'] == current_id].iloc[0]
+    current_word_row = df_all[df_all['id'] == current_id].iloc[0]
     word_text = str(current_word_row.get('word', '')).strip()
 
+    # 문제 텍스트
     st.markdown(st.session_state.question_text)
 
+    # blank 문장
     if st.session_state.question_type == 'blank':
         blank_sentence = st.session_state.example_blank_to_show
         if blank_sentence:
             st.info(blank_sentence)
 
+    # 발음
     try:
         sound_file = BytesIO()
         tts = gTTS(text=word_text, lang='en')
@@ -542,6 +533,7 @@ elif st.session_state.app_mode == 'quiz':
 
     st.caption(f"Part of Speech: *{current_word_row.get('pos', '')}*")
 
+    # 답변 전
     if not st.session_state.quiz_answered:
         cols = st.columns(2)
         for i, option in enumerate(st.session_state.quiz_options):
@@ -553,6 +545,7 @@ elif st.session_state.app_mode == 'quiz':
                 update_srs(current_id, is_correct)
                 st.rerun()
 
+    # 답변 후
     else:
         selected = st.session_state.selected_option
         is_correct = selected in st.session_state.correct_answers
@@ -584,9 +577,10 @@ elif st.session_state.app_mode == 'quiz':
             st.session_state.question_type = None
             st.session_state.question_text = ""
             st.session_state.quiz_options = []
+            st.session_state.example_blank_to_show = ""
             st.rerun()
 
-# --- 화면 3: 결과 ---
+# --- 화면 3: 요약 ---
 elif st.session_state.app_mode == 'summary':
     st.balloons()
     st.markdown("## 🏆 Session Complete!")
@@ -608,6 +602,7 @@ elif st.session_state.app_mode == 'summary':
         st.session_state.app_mode = 'setup'
         st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
         st.rerun()
+
 
 
 # ###########################################
