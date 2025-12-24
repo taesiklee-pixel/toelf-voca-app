@@ -625,14 +625,14 @@ with st.sidebar:
     if st.button("Check Gemini Installation"):
         try:
             import google.generativeai as genai
-                st.success("google-generativeai import OK ✅")
+            st.success("google-generativeai import OK ✅")
         except Exception as e:
             st.error(f"Import failed ❌: {type(e).__name__} - {e}")
 
     if st.button("Gemini Health Check"):
         try:
             import google.generativeai as genai
-                key = st.secrets.get("GEMINI_API_KEY", "")
+            key = st.secrets.get("GEMINI_API_KEY", "")
             if not key:
                 st.error("❌ GEMINI_API_KEY not found in st.secrets")
             else:
