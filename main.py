@@ -4,6 +4,7 @@ import datetime
 import random
 import ast
 import json
+import re
 from io import BytesIO
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
@@ -33,7 +34,6 @@ def load_data():
         if 'word' in df.columns:
             df = df.drop_duplicates(subset=['word'], keep='first')
 
-        # 컬럼 구조 동기화 체크
         needs_initial_save = False
 
         for col in ['mistake_count', 'box', 'next_review']:
@@ -55,7 +55,7 @@ def load_data():
         df['box'] = df['box'].fillna(0).astype(int)
         df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
 
-        # id 컬럼은 있어야 동작(필수)
+        # id 컬럼 필수
         if 'id' not in df.columns:
             st.error("ERROR: 'id' column not found in Sheet1.")
             st.stop()
@@ -75,22 +75,29 @@ def load_data():
 
 def ensure_qc_sheet_and_header():
     """
-    QC_Log 워크시트가 있고, 최소한 헤더(row1)가 존재하도록 보장.
-    워크시트 탭 자체가 없으면 안내.
+    QC_Log 워크시트가 있고, 헤더가 확실히 존재하도록 보장.
+    streamlit_gsheets는 '빈 DF'를 update하면 헤더가 안 생기는 경우가 있어
+    "seed row 1개"를 먼저 써서 컬럼을 강제로 생성한다.
     """
     try:
         df_old = conn.read(worksheet=QC_SHEET, ttl=0)
-        if df_old is None or df_old.empty:
-            df_init = pd.DataFrame(columns=QC_COLUMNS)
+
+        # sheet가 비어있거나 columns가 제대로 못 읽힌 경우:
+        if df_old is None or df_old.empty or len(getattr(df_old, "columns", [])) == 0:
+            seed = {c: "" for c in QC_COLUMNS}
+            df_init = pd.DataFrame([seed], columns=QC_COLUMNS)  # 1행 seed로 헤더 생성 보장
             conn.update(worksheet=QC_SHEET, data=df_init)
-        else:
-            df_old.columns = df_old.columns.str.lower()
-            missing = [c for c in QC_COLUMNS if c not in df_old.columns]
-            if missing:
-                for c in missing:
-                    df_old[c] = ""
-                df_old = df_old[QC_COLUMNS]
-                conn.update(worksheet=QC_SHEET, data=df_old)
+            return True
+
+        # 컬럼 동기화
+        df_old.columns = df_old.columns.str.lower()
+        missing = [c for c in QC_COLUMNS if c not in df_old.columns]
+        if missing:
+            for c in missing:
+                df_old[c] = ""
+            df_old = df_old[QC_COLUMNS]
+            conn.update(worksheet=QC_SHEET, data=df_old)
+
         return True
     except Exception:
         st.warning(f"Worksheet '{QC_SHEET}' not found. Please create it in Google Sheet.")
@@ -108,9 +115,15 @@ def append_qc_log(rows):
 
     try:
         df_old = conn.read(worksheet=QC_SHEET, ttl=0)
+        if df_old is None or len(getattr(df_old, "columns", [])) == 0:
+            # 혹시라도 또 비어있으면 seed부터
+            seed = {c: "" for c in QC_COLUMNS}
+            df_old = pd.DataFrame([seed], columns=QC_COLUMNS)
         df_old.columns = df_old.columns.str.lower()
 
         df_new = pd.DataFrame(rows)
+        if df_new is None or df_new.empty:
+            return
         df_new.columns = df_new.columns.str.lower()
 
         # 컬럼 보정
@@ -124,7 +137,11 @@ def append_qc_log(rows):
         df_new = df_new[QC_COLUMNS]
 
         merged = pd.concat([df_old, df_new], ignore_index=True)
+
+        # (선택) seed row가 맨 윗줄에만 있고 실제 로그 없을 때 seed 제거하고 싶으면 여기서 필터 가능
+        # 다만 seed를 제거하면 헤더 문제 재발하는 환경이 있어 유지하는 편이 안전.
         conn.update(worksheet=QC_SHEET, data=merged)
+
     except Exception as e:
         st.error(f"QC_Log append failed: {e}")
 
@@ -149,7 +166,7 @@ if 'selected_option' not in st.session_state:
 
 # 문제 타입/정답/문항 텍스트 상태
 if 'question_type' not in st.session_state:
-    st.session_state.question_type = None  # 'synonym' or 'blank'
+    st.session_state.question_type = None
 if 'correct_answers' not in st.session_state:
     st.session_state.correct_answers = set()
 if 'question_text' not in st.session_state:
@@ -235,12 +252,13 @@ def parse_list(x):
     return []
 
 def build_question_for_word(word_row, df_all):
-    new_id = int(word_row['id'])
-    word_text = str(word_row.get('word', '')).strip()
-    target_pos = str(word_row.get('pos', '')).strip().lower()
-    target_topic = str(word_row.get('topic', '')).strip()
+    # word_row may be dict (simulation) or Series (quiz)
+    new_id = int(word_row.get('id')) if isinstance(word_row, dict) else int(word_row['id'])
+    word_text = str(word_row.get('word', '') if isinstance(word_row, dict) else word_row.get('word', '')).strip()
+    target_pos = str(word_row.get('pos', '') if isinstance(word_row, dict) else word_row.get('pos', '')).strip().lower()
+    target_topic = str(word_row.get('topic', '') if isinstance(word_row, dict) else word_row.get('topic', '')).strip()
 
-    example_blank = str(word_row.get('example_blank', '')).strip()
+    example_blank = str(word_row.get('example_blank', '') if isinstance(word_row, dict) else word_row.get('example_blank', '')).strip()
     can_blank = (example_blank != "" and example_blank.lower() not in ['nan', 'none'])
 
     qtype = random.choice(['synonym', 'blank'])
@@ -252,7 +270,7 @@ def build_question_for_word(word_row, df_all):
 
     # [A] Synonym
     if qtype == 'synonym':
-        synonyms = parse_list(word_row.get('synonyms', ''))
+        synonyms = parse_list(word_row.get('synonyms', '') if isinstance(word_row, dict) else word_row.get('synonyms', ''))
         synonyms = [s for s in synonyms if isinstance(s, str) and s.strip() != ""]
         if not synonyms:
             if can_blank:
@@ -275,7 +293,7 @@ def build_question_for_word(word_row, df_all):
                 candidate_df = df_pool[df_pool['id'] != new_id]
 
             wrong_pool = []
-            for syn_list in candidate_df['synonyms']:
+            for syn_list in candidate_df.get('synonyms', []):
                 for w in parse_list(syn_list):
                     if isinstance(w, str) and w.strip() != "":
                         wrong_pool.append(w)
@@ -297,7 +315,7 @@ def build_question_for_word(word_row, df_all):
     question_text = "### Fill in the blank with the best word:"
     correct_set = set([word_text])
 
-    confusables = parse_list(word_row.get('confusables', ''))
+    confusables = parse_list(word_row.get('confusables', '') if isinstance(word_row, dict) else word_row.get('confusables', ''))
     confusables = [c for c in confusables if isinstance(c, str) and c.strip() != "" and c != word_text]
 
     options = [word_text]
@@ -333,13 +351,38 @@ def build_question_for_word(word_row, df_all):
     return 'blank', question_text, options, correct_set, {'example_blank': example_blank}
 
 # =========================================================
-# 3) Gemini QC Stub (실제 Gemini API로 교체 예정)
+# 3) Gemini QC (실제 선택/정답여부 기록)
 # =========================================================
-def gemini_qc_stub(question_text, example_blank, options, correct_answers):
+def _extract_json(text: str):
+    """
+    모델이 주변 설명을 붙여도 첫 JSON 객체를 뽑아낸다.
+    """
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+def gemini_qc(question_text, example_blank, options, correct_answers, use_gemini=True):
+    """
+    Returns dict: {flag, reasons, llm_selected, llm_is_correct}
+    - llm_selected / llm_is_correct는 절대 empty가 되지 않도록 fallback 포함
+    - flag 기준:
+        1) options에 정답이 없음
+        2) blank인데 example_blank 비어있음
+        3) LLM이 고른 답이 틀림 (원하면 이 기준은 끌 수도 있음)
+        4) 응답 파싱 실패(모델 이상) -> flag=1
+    """
     reasons = []
     flag = 0
 
-    if not any(opt in correct_answers for opt in options):
+    # 기본 데이터 QC
+    has_correct_in_options = any(opt in correct_answers for opt in options)
+    if not has_correct_in_options:
         flag = 1
         reasons.append("No correct answer included in options.")
 
@@ -347,12 +390,131 @@ def gemini_qc_stub(question_text, example_blank, options, correct_answers):
         flag = 1
         reasons.append("Blank question has empty example_blank.")
 
-    return {
-        "flag": flag,
-        "reasons": reasons,
-        "llm_selected": "",
-        "llm_is_correct": ""
-    }
+    # 기본 fallback (항상 채움)
+    fallback_selected = options[0] if options else ""
+    fallback_is_correct = bool(fallback_selected in correct_answers)
+
+    # Gemini 사용 안 함(=stub 모드): 그래도 '선택'은 하게 만들기
+    if not use_gemini:
+        llm_selected = fallback_selected
+        llm_is_correct = fallback_is_correct
+        # (선택) 틀리면 flag 올리기
+        if not llm_is_correct:
+            flag = 1
+            reasons.append("LLM(selected by fallback) is incorrect.")
+        return {
+            "flag": int(flag),
+            "reasons": reasons,
+            "llm_selected": llm_selected,
+            "llm_is_correct": bool(llm_is_correct)
+        }
+
+    # Gemini 호출
+    try:
+        import google.generativeai as genai
+
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+        if not api_key:
+            # 키 없으면 자동 fallback
+            llm_selected = fallback_selected
+            llm_is_correct = fallback_is_correct
+            flag = 1
+            reasons.append("GEMINI_API_KEY missing; used fallback selection.")
+            return {
+                "flag": int(flag),
+                "reasons": reasons,
+                "llm_selected": llm_selected,
+                "llm_is_correct": bool(llm_is_correct)
+            }
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        # 모델에 “사용자처럼 풀기” + 구조화 JSON 반환 요구
+        prompt = {
+            "role": "user",
+            "parts": [f"""
+You are taking a TOEFL vocabulary quiz. Choose the best option from the given choices.
+
+Question:
+{question_text}
+
+Sentence (if any):
+{example_blank}
+
+Options:
+{json.dumps(options, ensure_ascii=False)}
+
+Return ONLY valid JSON with this schema:
+{{
+  "selected": "<one of the options exactly>",
+  "confidence": 0.0,
+  "notes": ["short reason 1", "short reason 2"]
+}}
+
+Rules:
+- "selected" MUST be exactly one of the provided options.
+- No extra text outside JSON.
+"""]
+        }
+
+        resp = model.generate_content(prompt)
+        text = getattr(resp, "text", "") or ""
+        data = _extract_json(text)
+
+        if not data or "selected" not in data:
+            # 파싱 실패 fallback
+            llm_selected = fallback_selected
+            llm_is_correct = fallback_is_correct
+            flag = 1
+            reasons.append("Gemini response parse failed; used fallback selection.")
+            return {
+                "flag": int(flag),
+                "reasons": reasons,
+                "llm_selected": llm_selected,
+                "llm_is_correct": bool(llm_is_correct)
+            }
+
+        llm_selected = str(data["selected"]).strip()
+        if llm_selected not in options:
+            # 모델이 규칙 어겼으면 fallback
+            llm_selected = fallback_selected
+            flag = 1
+            reasons.append("Gemini selected an option not in list; used fallback selection.")
+
+        llm_is_correct = bool(llm_selected in correct_answers)
+
+        # (QC 정책) LLM이 틀린 경우도 flag=1로 올리기
+        if not llm_is_correct:
+            flag = 1
+            reasons.append("Gemini selected an incorrect answer.")
+
+        # notes도 reasons에 붙이기(짧게)
+        notes = data.get("notes", [])
+        if isinstance(notes, list):
+            for n in notes[:3]:
+                if isinstance(n, str) and n.strip():
+                    reasons.append(f"Gemini: {n.strip()}")
+
+        return {
+            "flag": int(flag),
+            "reasons": reasons,
+            "llm_selected": llm_selected,
+            "llm_is_correct": bool(llm_is_correct)
+        }
+
+    except Exception as e:
+        # 호출 실패 fallback
+        llm_selected = fallback_selected
+        llm_is_correct = fallback_is_correct
+        flag = 1
+        reasons.append(f"Gemini call failed; used fallback selection. ({type(e).__name__})")
+        return {
+            "flag": int(flag),
+            "reasons": reasons,
+            "llm_selected": llm_selected,
+            "llm_is_correct": bool(llm_is_correct)
+        }
 
 # =========================================================
 # 4) UI
@@ -374,9 +536,10 @@ with st.sidebar:
     st.divider()
     st.header("QC (Gemini)")
 
+    use_gemini = st.toggle("Use Gemini API", value=False, help="OFF면 fallback(=규칙 기반 선택)으로도 llm_selected/llm_is_correct를 채웁니다.")
     sim_n = st.number_input("Simulate N questions", min_value=1, max_value=2000, value=100, step=50)
 
-    if st.button("Run QC Simulation (Stub)"):
+    if st.button("Run QC Simulation"):
         ok = ensure_qc_sheet_and_header()
         if not ok:
             st.stop()
@@ -387,20 +550,34 @@ with st.sidebar:
         logs = []
         flagged = 0
 
-        sampled = df_all.sample(min(sim_n, len(df_all))).to_dict("records")
+        sampled = df_all.sample(min(int(sim_n), len(df_all))).to_dict("records")
 
         for row in sampled:
             qtype, qtext, options, correct_set, extra = build_question_for_word(row, df_all)
             ex_blank = extra.get("example_blank", "")
 
-            qc = gemini_qc_stub(qtext, ex_blank, options, correct_set)
+            qc = gemini_qc(
+                question_text=qtext,
+                example_blank=ex_blank,
+                options=options,
+                correct_answers=correct_set,
+                use_gemini=use_gemini
+            )
 
-            if qc["flag"] == 1:
+            if int(qc.get("flag", 0)) == 1:
                 flagged += 1
+
+            llm_selected = qc.get("llm_selected", "")
+            llm_is_correct = qc.get("llm_is_correct", False)
+
+            # 절대 empty 방지
+            if not llm_selected:
+                llm_selected = options[0] if options else ""
+                llm_is_correct = bool(llm_selected in correct_set)
 
             logs.append({
                 "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "session_id": session_id,
+                "session_id": int(session_id),
                 "word_id": int(row.get("id")),
                 "word": str(row.get("word", "")),
                 "qtype": qtype,
@@ -408,9 +585,9 @@ with st.sidebar:
                 "example_blank": ex_blank,
                 "options": json.dumps(options, ensure_ascii=False),
                 "correct_answers": json.dumps(sorted(list(correct_set)), ensure_ascii=False),
-                "llm_selected": qc.get("llm_selected", ""),
-                "llm_is_correct": qc.get("llm_is_correct", ""),
-                "flag": int(qc["flag"]),
+                "llm_selected": str(llm_selected),
+                "llm_is_correct": str(bool(llm_is_correct)),
+                "flag": int(qc.get("flag", 0)),
                 "reasons": json.dumps(qc.get("reasons", []), ensure_ascii=False),
             })
 
@@ -580,6 +757,7 @@ elif st.session_state.app_mode == 'summary':
         st.session_state.app_mode = 'setup'
         st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
         st.rerun()
+
 
 
 
