@@ -17,13 +17,19 @@ def load_data():
         # 캐시 없이 매번 최신 데이터 로드
         df = conn.read(worksheet="Sheet1", ttl=0)
         
-        # [수정 1] 컬럼명 대소문자 통일 (POS -> pos, WORD -> word 등)
-        # 이 한 줄 덕분에 시트에 POS라고 적혀있어도 pos로 인식합니다.
+        # 1. 컬럼명 소문자 통일 (POS -> pos 등)
         df.columns = df.columns.str.lower()
         
-        # 중복 단어 제거 (혹시 모를 오류 방지)
+        # 2. 중복 단어 제거
         df = df.drop_duplicates(subset=['word'], keep='first')
         
+        # 3. [NEW] 오답 횟수(mistake_count) 컬럼이 없으면 생성 및 0으로 초기화
+        if 'mistake_count' not in df.columns:
+            df['mistake_count'] = 0
+        
+        # NaN 값을 0으로 채우기 (기존 데이터 호환성)
+        df['mistake_count'] = df['mistake_count'].fillna(0).astype(int)
+
         if df.empty:
             st.warning("Google Sheet is empty.")
             st.stop()
@@ -37,13 +43,20 @@ if 'vocab_db' not in st.session_state:
 
 # 데이터 전처리
 df = st.session_state.vocab_db
+
+# next_review 날짜 처리
 if 'next_review' not in df.columns:
     df['next_review'] = None
 df['next_review'] = df['next_review'].astype(str).replace(['nan', 'None'], '0000-00-00')
 
+# box 처리
+if 'box' not in df.columns:
+    df['box'] = 0
+df['box'] = df['box'].fillna(0).astype(int)
+
 # --- [앱 상태 관리 변수들] ---
 if 'app_mode' not in st.session_state:
-    st.session_state.app_mode = 'setup'  # setup / quiz / summary
+    st.session_state.app_mode = 'setup'  
 if 'session_config' not in st.session_state:
     st.session_state.session_config = {} 
 if 'session_stats' not in st.session_state:
@@ -52,7 +65,6 @@ if 'current_word_id' not in st.session_state:
     st.session_state.current_word_id = None
 if 'quiz_options' not in st.session_state:
     st.session_state.quiz_options = []
-# 퀴즈 상태 관리용 변수
 if 'quiz_answered' not in st.session_state:
     st.session_state.quiz_answered = False
 if 'selected_option' not in st.session_state:
@@ -79,8 +91,16 @@ def get_next_word():
     today_str = str(datetime.date.today())
     
     if mode == 'Review Mistakes Only':
-        # 오답 노트: Box가 0인 것(틀려서 리셋된 것)만 필터링
-        logic_mask = df['box'] == 0
+        # [수정된 로직] 오답 노트: 
+        # Box가 0이면서(초기화됨) AND 오답 횟수(mistake_count)가 1 이상인 것
+        # 이렇게 하면 '아직 안 푼 새 단어(count 0)'는 제외됩니다.
+        logic_mask = (df['box'] == 0) & (df['mistake_count'] > 0)
+        
+        # 만약 틀린 단어가 하나도 없다면?
+        if df[mask & logic_mask].empty:
+            st.toast("No mistakes found! Switching to Standard mode.")
+            logic_mask = df['next_review'] <= today_str
+            
     else:
         # 일반 모드: 오늘 복습해야 할 단어 OR 아직 안 본 단어
         logic_mask = df['next_review'] <= today_str
@@ -99,14 +119,19 @@ def update_srs(word_id, is_correct):
     idx = df[df['id'] == word_id].index[0]
     current_box = df.at[idx, 'box']
     
+    # mistake_count 가져오기 (없으면 0)
+    current_mistakes = df.at[idx, 'mistake_count'] if 'mistake_count' in df.columns else 0
+    
     if is_correct:
         st.session_state.session_stats['correct'] += 1
         new_box = min(current_box + 1, 5)
         days_to_add = int(2 ** new_box)
+        new_mistakes = current_mistakes # 맞았으면 오답 수 유지
     else:
         st.session_state.session_stats['wrong'] += 1
-        new_box = 0
+        new_box = 0 # 박스 초기화
         days_to_add = 0
+        new_mistakes = current_mistakes + 1 # [NEW] 오답 횟수 증가
     
     st.session_state.session_stats['total'] += 1
         
@@ -115,6 +140,7 @@ def update_srs(word_id, is_correct):
     # DB 메모리 업데이트
     st.session_state.vocab_db.at[idx, 'box'] = new_box
     st.session_state.vocab_db.at[idx, 'next_review'] = str(next_date)
+    st.session_state.vocab_db.at[idx, 'mistake_count'] = new_mistakes
     
     # 구글 시트 저장
     conn.update(worksheet="Sheet1", data=st.session_state.vocab_db)
@@ -127,12 +153,13 @@ st.title("🎓 NicholaSOOBIN TOEFL Voca")
 # 사이드바 데이터 관리
 with st.sidebar:
     st.header("Data Management")
-    if st.button("Reset All Progress (Keep Words)"):
+    if st.button("Reset All Progress"):
         df_reset = st.session_state.vocab_db.copy()
         df_reset['box'] = 0
         df_reset['next_review'] = '0000-00-00'
+        df_reset['mistake_count'] = 0 # 리셋 시 오답 기록도 초기화
         conn.update(worksheet="Sheet1", data=df_reset)
-        st.toast("DB Reset Complete!")
+        st.toast("All progress has been reset.")
         st.session_state.clear()
         st.rerun()
 
@@ -145,8 +172,9 @@ if st.session_state.app_mode == 'setup':
         with c1:
             topic_list = ["All", "Science", "History", "Social Science", "Business", "Environment", "Education"]
             sel_topic = st.selectbox("Topic", topic_list)
+            # 모드 설명 업데이트
             sel_mode = st.radio("Mode", ["Standard Study (SRS)", "Review Mistakes Only"], 
-                                help="Standard: Due words | Mistakes: Only words you got wrong (Box 0)")
+                                help="Standard: New & Due words | Mistakes: Only words you got wrong before")
         with c2:
             sel_goal = st.selectbox("Daily Goal", [5, 10, 15, 20, 30])
             sel_diff = st.slider("Difficulty", 1, 3, (1, 3))
@@ -181,7 +209,7 @@ elif st.session_state.app_mode == 'quiz':
     df = st.session_state.vocab_db
 
     # -------------------------------------------------------
-    # 문제 로딩 로직 (엄격한 품사 필터링 + 보기 생성)
+    # 문제 로딩 로직
     # -------------------------------------------------------
     if st.session_state.current_word_id is None:
         new_id = get_next_word()
@@ -200,14 +228,12 @@ elif st.session_state.app_mode == 'quiz':
             options = [correct_option]
             
             # [오답 보기 추출]
-            # 1. 타겟 품사 확인
             target_pos = str(current_word.get('pos', '')).strip().lower()
             
-            # 2. 비교용 임시 컬럼 생성 (품사 필터링용)
             df_pool = df.copy()
             df_pool['pos_norm'] = df_pool['pos'].fillna('').astype(str).str.strip().str.lower()
             
-            # 3. 같은 품사 필터링 (엄격 모드)
+            # 품사 필터링
             if target_pos and target_pos != 'nan' and target_pos != '':
                 candidate_df = df_pool[(df_pool['pos_norm'] == target_pos) & (df_pool['id'] != new_id)]
                 if candidate_df.empty:
@@ -215,7 +241,7 @@ elif st.session_state.app_mode == 'quiz':
             else:
                 candidate_df = df_pool[df_pool['id'] != new_id]
 
-            # 4. 오답 풀 수집
+            # 오답 풀 수집
             wrong_pool = []
             for syn_list in candidate_df['synonyms']:
                 if isinstance(syn_list, str):
@@ -225,7 +251,6 @@ elif st.session_state.app_mode == 'quiz':
                     for w in syn_list:
                         wrong_pool.append(w)
             
-            # 5. 정제 및 선택
             wrong_pool = list(set(wrong_pool))
             wrong_pool = [w for w in wrong_pool if w not in synonyms]
             
@@ -246,7 +271,9 @@ elif st.session_state.app_mode == 'quiz':
             st.session_state.selected_option = None
             
         else:
-            st.warning("No words found matching your criteria!")
+            st.warning("No words matching your criteria!")
+            if config['mode'] == 'Review Mistakes Only':
+                st.info("💡 You have no mistakes recorded yet! Try 'Standard Study' first.")
             if st.button("Back to Setup"):
                 st.session_state.app_mode = 'setup'
                 st.rerun()
@@ -266,7 +293,7 @@ elif st.session_state.app_mode == 'quiz':
     # 문제 화면 출력
     st.markdown(f"### What is a synonym for: **{current_word_row['word']}**?")
     
-    # 발음 듣기 (옵션)
+    # 발음 듣기
     try:
         sound_file = BytesIO()
         tts = gTTS(text=current_word_row['word'], lang='en')
@@ -278,7 +305,7 @@ elif st.session_state.app_mode == 'quiz':
 
     st.caption(f"Part of Speech: *{current_word_row['pos']}*")
     
-    # [A] 답변 전: 보기 버튼 표시
+    # [A] 답변 전
     if not st.session_state.quiz_answered:
         cols = st.columns(2)
         for i, option in enumerate(st.session_state.quiz_options):
@@ -291,26 +318,21 @@ elif st.session_state.app_mode == 'quiz':
                 update_srs(current_id, is_correct)
                 st.rerun()
 
-    # [B] 답변 후: 결과 및 상세 해설 표시
+    # [B] 답변 후
     else:
         selected = st.session_state.selected_option
         is_correct = selected in correct_synonyms
         
-        # 보기 목록 중에서 실제 정답 단어 찾기
         answer_in_options = [opt for opt in st.session_state.quiz_options if opt in correct_synonyms]
-        if answer_in_options:
-            final_answer_text = answer_in_options[0]
-        else:
-            final_answer_text = correct_synonyms[0]
+        final_answer_text = answer_in_options[0] if answer_in_options else correct_synonyms[0]
 
-        # 1. 정답 여부 메시지
+        # 정답 여부 메시지
         if is_correct:
             st.success(f"✅ Correct! **'{selected}'** is a synonym for **'{current_word_row['word']}'**.")
         else:
-            # 틀렸을 때: 여러 개 나열하지 않고 보기 중 정답만 표시
             st.error(f"❌ Incorrect. The answer is **'{final_answer_text}'**.")
 
-        # 2. 제시어(Target Word) 상세 정보 (정의 및 예문)
+        # 상세 정보
         st.markdown("---")
         st.markdown(f"#### 📖 Study: **{current_word_row['word']}**")
         
@@ -319,7 +341,6 @@ elif st.session_state.app_mode == 'quiz':
             f"**Example:** *{current_word_row['example']}*"
         )
 
-        # 3. 다음 문제 버튼
         if st.button("Next Question ➡️", type="primary"):
             st.session_state.current_word_id = None
             st.session_state.quiz_answered = False
