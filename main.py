@@ -73,11 +73,10 @@ def load_data():
         st.error(f"Google Sheet Connection Error: {e}")
         st.stop()
 
-# ---- [NEW] QC_Log 워크시트 헤더 보장 ----
 def ensure_qc_sheet_and_header():
     """
     QC_Log 워크시트가 있고, 최소한 헤더(row1)가 존재하도록 보장.
-    (워크시트가 아예 없으면 streamlit_gsheets 환경에 따라 자동 생성이 안 될 수 있어 안내만 함)
+    워크시트 탭 자체가 없으면 안내.
     """
     try:
         df_old = conn.read(worksheet=QC_SHEET, ttl=0)
@@ -95,10 +94,13 @@ def ensure_qc_sheet_and_header():
         return True
     except Exception:
         st.warning(f"Worksheet '{QC_SHEET}' not found. Please create it in Google Sheet.")
-        st.info("Create QC_Log worksheet tab, then rerun. Headers will be auto-initialized.")
+        st.info("Google Sheet에 QC_Log 탭(worksheet)을 만든 뒤 rerun 하세요. 헤더는 자동 생성됩니다.")
         return False
 
-def append_qc_log(rows: list[dict]):
+def append_qc_log(rows):
+    """
+    rows: list of dict
+    """
     if not rows:
         return
     if not ensure_qc_sheet_and_header():
@@ -128,8 +130,6 @@ def append_qc_log(rows: list[dict]):
 
 if 'vocab_db' not in st.session_state:
     st.session_state.vocab_db = load_data()
-
-df = st.session_state.vocab_db
 
 # --- 앱 상태 변수 ---
 if 'app_mode' not in st.session_state:
@@ -235,14 +235,6 @@ def parse_list(x):
     return []
 
 def build_question_for_word(word_row, df_all):
-    """
-    Returns:
-      question_type: 'synonym' or 'blank'
-      question_text: markdown
-      options: list[str]
-      correct_answers: set[str]
-      extra_display: dict
-    """
     new_id = int(word_row['id'])
     word_text = str(word_row.get('word', '')).strip()
     target_pos = str(word_row.get('pos', '')).strip().lower()
@@ -341,24 +333,16 @@ def build_question_for_word(word_row, df_all):
     return 'blank', question_text, options, correct_set, {'example_blank': example_blank}
 
 # =========================================================
-# 3) (선택) Gemini QC Stub
-#    - 여기서는 "flag=1/0" 판단만 예시로 넣어둡니다.
-#    - 실제 Gemini API 호출은 사용자 환경에 맞게 교체하세요.
+# 3) Gemini QC Stub (실제 Gemini API로 교체 예정)
 # =========================================================
 def gemini_qc_stub(question_text, example_blank, options, correct_answers):
-    """
-    TODO: 실제 Gemini API로 교체.
-    지금은 단순 휴리스틱으로 "이상 가능성"을 잡는 예시.
-    """
     reasons = []
     flag = 0
 
-    # 보기 중 정답이 아예 없으면 문제
     if not any(opt in correct_answers for opt in options):
         flag = 1
         reasons.append("No correct answer included in options.")
 
-    # blank 문제인데 example_blank가 비어있으면 문제
     if "Fill in the blank" in question_text and (not example_blank or example_blank.strip() == ""):
         flag = 1
         reasons.append("Blank question has empty example_blank.")
@@ -398,12 +382,11 @@ with st.sidebar:
             st.stop()
 
         df_all = st.session_state.vocab_db
-        session_id = random.randint(10, 10_000)
+        session_id = random.randint(10, 10000)
 
         logs = []
         flagged = 0
 
-        # 후보를 넉넉히 섞어서 sim_n만큼
         sampled = df_all.sample(min(sim_n, len(df_all))).to_dict("records")
 
         for row in sampled:
@@ -433,7 +416,7 @@ with st.sidebar:
 
         append_qc_log(logs)
         st.success(f"QC done. Flagged: {flagged} / {len(logs)} (session_id={session_id})")
-        st.caption("Check Google Sheet → QC_Log tab.")
+        st.caption("Google Sheet → QC_Log 탭에서 확인하세요.")
 
 # --- 화면 1: 설정 ---
 if st.session_state.app_mode == 'setup':
@@ -512,16 +495,13 @@ elif st.session_state.app_mode == 'quiz':
     current_word_row = df_all[df_all['id'] == current_id].iloc[0]
     word_text = str(current_word_row.get('word', '')).strip()
 
-    # 문제 텍스트
     st.markdown(st.session_state.question_text)
 
-    # blank 문장
     if st.session_state.question_type == 'blank':
         blank_sentence = st.session_state.example_blank_to_show
         if blank_sentence:
             st.info(blank_sentence)
 
-    # 발음
     try:
         sound_file = BytesIO()
         tts = gTTS(text=word_text, lang='en')
@@ -533,7 +513,6 @@ elif st.session_state.app_mode == 'quiz':
 
     st.caption(f"Part of Speech: *{current_word_row.get('pos', '')}*")
 
-    # 답변 전
     if not st.session_state.quiz_answered:
         cols = st.columns(2)
         for i, option in enumerate(st.session_state.quiz_options):
@@ -545,7 +524,6 @@ elif st.session_state.app_mode == 'quiz':
                 update_srs(current_id, is_correct)
                 st.rerun()
 
-    # 답변 후
     else:
         selected = st.session_state.selected_option
         is_correct = selected in st.session_state.correct_answers
@@ -602,6 +580,7 @@ elif st.session_state.app_mode == 'summary':
         st.session_state.app_mode = 'setup'
         st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
         st.rerun()
+
 
 
 
