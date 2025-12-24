@@ -623,28 +623,29 @@ with st.sidebar:
     sim_n = st.number_input("Simulate N questions", min_value=1, max_value=2000, value=100, step=50)
 
     if st.button("Check Gemini Installation"):
-    try:
-        import google.generativeai as genai
-            st.success("google-generativeai import OK ✅")
-    except Exception as e:
+        try:
+            import google.generativeai as genai
+                st.success("google-generativeai import OK ✅")
+        except Exception as e:
             st.error(f"Import failed ❌: {type(e).__name__} - {e}")
 
     if st.button("Gemini Health Check"):
-    try:
-        import google.generativeai as genai
-        key = st.secrets.get("GEMINI_API_KEY", "")
-        if not key:
-            st.error("❌ GEMINI_API_KEY not found in st.secrets")
-        else:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            r = model.generate_content("Say OK")
-            st.success("✅ Gemini call OK")
-            st.write(r.text)
-    except Exception as e:
-        st.error(f"❌ Gemini error: {type(e).__name__} - {e}")
+        try:
+            import google.generativeai as genai
+                key = st.secrets.get("GEMINI_API_KEY", "")
+            if not key:
+                st.error("❌ GEMINI_API_KEY not found in st.secrets")
+            else:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                r = model.generate_content("Say OK")
+                st.success("✅ Gemini call OK")
+                st.write(r.text)
+        except Exception as e:
+            st.error(f"❌ Gemini error: {type(e).__name__} - {e}")
 
-    if st.button("Run QC Simulation"):
+if st.button("Run QC Simulation"):
+    try:
         ok = ensure_qc_sheet_and_header()
         if not ok:
             st.stop()
@@ -661,45 +662,35 @@ with st.sidebar:
             qtype, qtext, options, correct_set, extra = build_question_for_word(row, df_all)
             ex_blank = extra.get("example_blank", "")
 
-            qc = gemini_qc(
+            qc = gemini_qc_real(
                 question_text=qtext,
                 example_blank=ex_blank,
                 options=options,
-                correct_answers=correct_set,
-                use_gemini=use_gemini
+                correct_answers=correct_set
             )
-
-            if int(qc.get("flag", 0)) == 1:
-                flagged += 1
-
-            llm_selected = str(qc.get("llm_selected", "")).strip()
-            if not llm_selected:
-                llm_selected = options[0] if options else ""
-
-            llm_is_correct_bool = to_bool(qc.get("llm_is_correct", "FALSE"))
-            # 만약 selected가 fallback으로 강제 채워졌으면 정확도 다시 계산
-            if llm_selected and (str(qc.get("llm_selected", "")).strip() == ""):
-                llm_is_correct_bool = bool(llm_selected in set(correct_set))
 
             logs.append({
                 "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "session_id": int(session_id),
+                "session_id": session_id,
                 "word_id": int(row.get("id")),
                 "word": str(row.get("word", "")),
                 "qtype": qtype,
                 "question_text": qtext,
                 "example_blank": ex_blank,
                 "options": json.dumps(options, ensure_ascii=False),
-                "correct_answers": json.dumps(sorted(list(correct_set)), ensure_ascii=False),
-                "llm_selected": llm_selected,
-                "llm_is_correct": "TRUE" if llm_is_correct_bool else "FALSE",
-                "flag": int(qc.get("flag", 0)),
-                "reasons": json.dumps(qc.get("reasons", []), ensure_ascii=False),
+                "correct_answers": json.dumps(list(correct_set), ensure_ascii=False),
+                "llm_selected": qc["llm_selected"],
+                "llm_is_correct": qc["llm_is_correct"],
+                "flag": qc["flag"],
+                "reasons": json.dumps(qc["reasons"], ensure_ascii=False),
             })
 
         append_qc_log(logs)
-        st.success(f"QC done. Flagged: {flagged} / {len(logs)} (session_id={session_id})")
-        st.caption("Google Sheet → QC_Log 탭에서 확인하세요.")
+        st.success(f"QC done. Flagged: {len([r for r in logs if r['flag'] == 1])}")
+
+    except Exception as e:
+        st.error(f"QC failed: {e}")
+
 
 # --- 화면 1: 설정 ---
 if st.session_state.app_mode == "setup":
