@@ -75,38 +75,53 @@ def load_data():
 
 def ensure_qc_sheet_and_header():
     """
-    QC_Log 워크시트가 있고, 헤더가 확실히 존재하도록 보장.
-    streamlit_gsheets는 '빈 DF'를 update하면 헤더가 안 생기는 경우가 있어
-    "seed row 1개"를 먼저 써서 컬럼을 강제로 생성한다.
+    QC_Log 워크시트가 있고, 헤더 + seed row가 존재하도록 보장.
+    seed row는 ts="__seed__"로 표시.
     """
     try:
         df_old = conn.read(worksheet=QC_SHEET, ttl=0)
 
-        # sheet가 비어있거나 columns가 제대로 못 읽힌 경우:
+        # 시트가 비었거나 columns가 제대로 없으면 seed row로 생성
         if df_old is None or df_old.empty or len(getattr(df_old, "columns", [])) == 0:
             seed = {c: "" for c in QC_COLUMNS}
-            df_init = pd.DataFrame([seed], columns=QC_COLUMNS)  # 1행 seed로 헤더 생성 보장
+            seed["ts"] = "__seed__"
+            df_init = pd.DataFrame([seed], columns=QC_COLUMNS)
             conn.update(worksheet=QC_SHEET, data=df_init)
             return True
 
-        # 컬럼 동기화
+        # 컬럼 동기화(대소문자 문제 줄이기 위해 lower)
         df_old.columns = df_old.columns.str.lower()
+
+        # df_old에 없는 컬럼 추가
         missing = [c for c in QC_COLUMNS if c not in df_old.columns]
         if missing:
             for c in missing:
                 df_old[c] = ""
-            df_old = df_old[QC_COLUMNS]
-            conn.update(worksheet=QC_SHEET, data=df_old)
 
+        # 컬럼 순서 고정
+        df_old = df_old[[c for c in QC_COLUMNS]]
+
+        # seed row가 없으면 추가 (헤더가 꼬이는 환경 방어)
+        if "ts" in df_old.columns:
+            if not (df_old["ts"].astype(str) == "__seed__").any():
+                seed = {c: "" for c in QC_COLUMNS}
+                seed["ts"] = "__seed__"
+                df_old = pd.concat([pd.DataFrame([seed]), df_old], ignore_index=True)
+
+        conn.update(worksheet=QC_SHEET, data=df_old)
         return True
+
     except Exception:
         st.warning(f"Worksheet '{QC_SHEET}' not found. Please create it in Google Sheet.")
         st.info("Google Sheet에 QC_Log 탭(worksheet)을 만든 뒤 rerun 하세요. 헤더는 자동 생성됩니다.")
         return False
 
+
 def append_qc_log(rows):
     """
     rows: list of dict
+    - seed row(ts="__seed__")는 append 전에 제거하고 다시 씀
+    - llm_selected/llm_is_correct는 절대 빈값으로 저장되지 않도록 강제
     """
     if not rows:
         return
@@ -116,9 +131,8 @@ def append_qc_log(rows):
     try:
         df_old = conn.read(worksheet=QC_SHEET, ttl=0)
         if df_old is None or len(getattr(df_old, "columns", [])) == 0:
-            # 혹시라도 또 비어있으면 seed부터
-            seed = {c: "" for c in QC_COLUMNS}
-            df_old = pd.DataFrame([seed], columns=QC_COLUMNS)
+            df_old = pd.DataFrame(columns=QC_COLUMNS)
+
         df_old.columns = df_old.columns.str.lower()
 
         df_new = pd.DataFrame(rows)
@@ -136,10 +150,43 @@ def append_qc_log(rows):
         df_old = df_old[QC_COLUMNS]
         df_new = df_new[QC_COLUMNS]
 
+        # ✅ seed row 제거 (ts == "__seed__")
+        if "ts" in df_old.columns:
+            df_old = df_old[df_old["ts"].astype(str) != "__seed__"]
+
+        # ✅ llm 컬럼 강제 채우기 (혹시라도 빈값이면 options[0]으로)
+        # rows 생성 쪽에서도 채우지만, 여기서 한 번 더 안전장치
+        def _fill_llm(row):
+            opt_list = []
+            try:
+                opt_list = json.loads(row.get("options", "[]"))
+            except:
+                opt_list = []
+            if not str(row.get("llm_selected", "")).strip():
+                row["llm_selected"] = opt_list[0] if opt_list else ""
+            if not str(row.get("llm_is_correct", "")).strip():
+                # correct_answers는 JSON list 문자열이라고 가정
+                try:
+                    ca = set(json.loads(row.get("correct_answers", "[]")))
+                except:
+                    ca = set()
+                row["llm_is_correct"] = str(row["llm_selected"] in ca)
+            return row
+
+        df_new = df_new.apply(lambda r: pd.Series(_fill_llm(r.to_dict())), axis=1)
+
         merged = pd.concat([df_old, df_new], ignore_index=True)
 
-        # (선택) seed row가 맨 윗줄에만 있고 실제 로그 없을 때 seed 제거하고 싶으면 여기서 필터 가능
-        # 다만 seed를 제거하면 헤더 문제 재발하는 환경이 있어 유지하는 편이 안전.
+        # ✅ 다시 seed row를 맨 위에 추가 (헤더 꼬임 방지용)
+        seed = {c: "" for c in QC_COLUMNS}
+        seed["ts"] = "__seed__"
+        merged = pd.concat([pd.DataFrame([seed]), merged], ignore_index=True)
+
+        # 문자열/NaN 정리
+        merged = merged.fillna("")
+        merged["llm_selected"] = merged["llm_selected"].astype(str)
+        merged["llm_is_correct"] = merged["llm_is_correct"].astype(str)
+
         conn.update(worksheet=QC_SHEET, data=merged)
 
     except Exception as e:
