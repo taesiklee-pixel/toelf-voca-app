@@ -5,6 +5,7 @@ import random
 import ast
 import json
 import re
+import time
 from io import BytesIO
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
@@ -428,14 +429,67 @@ def list_gemini_models(api_key: str):
     return names
 
 
-def gemini_pick_option(api_key: str, model_name: str, question_text: str, example_blank: str, options: list[str]):
+# def gemini_pick_option(api_key: str, model_name: str, question_text: str, example_blank: str, options: list[str]):
+#     """
+#     Gemini가 보기 중 하나를 선택하도록 하고,
+#     selected(옵션 문자열) + rationale(짧게) 반환.
+#     실패하면 (None, reason)
+#     """
+#     from google import genai
+
+#     client = genai.Client(api_key=api_key)
+
+#     prompt = f"""
+# You are taking a multiple-choice TOEFL vocabulary quiz.
+
+# QUESTION:
+# {question_text}
+
+# SENTENCE (if any):
+# {example_blank if example_blank else ""}
+
+# OPTIONS (choose exactly one):
+# {json.dumps(options, ensure_ascii=False)}
+
+# Return ONLY valid JSON:
+# {{
+#   "selected": "<must be exactly one of the OPTIONS strings>",
+#   "rationale": "<one short sentence>"
+# }}
+# """
+
+#     try:
+#         resp = client.models.generate_content(
+#             model=model_name,
+#             contents=prompt
+#         )
+
+#         text = ""
+#         # google-genai 응답 구조 방어적으로 처리
+#         if hasattr(resp, "text") and resp.text:
+#             text = resp.text.strip()
+#         else:
+#             text = str(resp).strip()
+
+#         # 모델이 주변 텍스트 붙일 수도 있어서 JSON만 추출
+#         m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+#         if not m:
+#             return None, f"JSON not found in response: {text[:120]}"
+
+#         data = json.loads(m.group(0))
+#         selected = str(data.get("selected", "")).strip()
+#         rationale = str(data.get("rationale", "")).strip()
+#         return {"selected": selected, "rationale": rationale}, None
+
+#     except Exception as e:
+#         return None, f"{type(e).__name__}: {e}"
+
+def gemini_pick_option(api_key: str, model_name: str, question_text: str, example_blank: str, options: list[str],
+                       max_retries: int = 5):
     """
-    Gemini가 보기 중 하나를 선택하도록 하고,
-    selected(옵션 문자열) + rationale(짧게) 반환.
-    실패하면 (None, reason)
+    Gemini 호출 (429/일시 오류는 재시도)
     """
     from google import genai
-
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
@@ -457,31 +511,42 @@ Return ONLY valid JSON:
 }}
 """
 
-    try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=prompt
-        )
+    last_err = None
 
-        text = ""
-        # google-genai 응답 구조 방어적으로 처리
-        if hasattr(resp, "text") and resp.text:
-            text = resp.text.strip()
-        else:
-            text = str(resp).strip()
+    for attempt in range(max_retries):
+        try:
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
 
-        # 모델이 주변 텍스트 붙일 수도 있어서 JSON만 추출
-        m = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not m:
-            return None, f"JSON not found in response: {text[:120]}"
+            text = getattr(resp, "text", "") or str(resp)
+            text = text.strip()
 
-        data = json.loads(m.group(0))
-        selected = str(data.get("selected", "")).strip()
-        rationale = str(data.get("rationale", "")).strip()
-        return {"selected": selected, "rationale": rationale}, None
+            m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if not m:
+                return None, f"JSON not found in response: {text[:120]}"
 
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+            data = json.loads(m.group(0))
+            selected = str(data.get("selected", "")).strip()
+            rationale = str(data.get("rationale", "")).strip()
+            return {"selected": selected, "rationale": rationale}, None
+
+        except Exception as e:
+            last_err = e
+
+            msg = str(e)
+            is_rate_limited = ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg)
+            is_transient = is_rate_limited or ("503" in msg) or ("UNAVAILABLE" in msg) or ("DEADLINE" in msg)
+
+            if not is_transient:
+                break
+
+            # 지수 백오프 + 지터
+            sleep_s = (2 ** attempt) + random.uniform(0, 0.5)
+            time.sleep(sleep_s)
+
+    return None, f"{type(last_err).__name__}: {last_err}"
 
 
 def qc_with_gemini_or_fallback(question_text, example_blank, options, correct_answers, use_gemini, api_key, model_name):
@@ -505,7 +570,8 @@ def qc_with_gemini_or_fallback(question_text, example_blank, options, correct_an
         reasons.append("Blank question has empty example_blank.")
 
     # fallback 항상 준비
-    fallback_selected = options[0] if options else ""
+    # fallback_selected = options[0] if options else ""
+    fallback_selected = random.choice(options) if options else ""
     fallback_is_correct = "TRUE" if (fallback_selected in correct_answers) else "FALSE"
 
     if not use_gemini:
