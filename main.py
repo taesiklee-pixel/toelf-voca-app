@@ -623,8 +623,8 @@ with st.sidebar:
     sim_n = st.number_input("Simulate N questions", min_value=1, max_value=2000, value=100, step=50)
 
     if st.button("Check Gemini Installation"):
-        try:
-            import google.generativeai as genai
+    try:
+        import google.generativeai as genai
             st.success("google-generativeai import OK ✅")
         except Exception as e:
             st.error(f"Import failed ❌: {type(e).__name__} - {e}")
