@@ -896,7 +896,7 @@ else:
             st.session_state.quiz_options = []
             st.session_state.example_blank_to_show = ""
             st.rerun()
-            
+
 elif st.session_state.app_mode == 'summary':
     st.balloons()
     st.markdown("## 🏆 Session Complete!")
