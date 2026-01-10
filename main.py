@@ -744,18 +744,14 @@ if st.session_state.app_mode == 'setup':
 #     goal = config['goal']
 #     current = stats['total']
     
-#     # [수정 1] 진행률 바는 보여주되, 여기서 바로 summary로 보내지 않습니다.
-#     # (기존에 있던 if current >= goal: ... 코드를 삭제했습니다)
-    
+#     # 진행률 표시
 #     st.progress(min(current / goal, 1.0))
 #     st.caption(f"Progress: {current} / {goal} (Topic: {config['topic']})")
 
 #     df_all = st.session_state.vocab_db
 
-#     # 문제 로딩 로직
+#     # --- 문제 로딩 로직 ---
 #     if st.session_state.current_word_id is None:
-#         # 목표를 다 채웠다면, 문제를 더 내지 않고 Summary로 갈 준비를 함
-#         # (하지만 이 블록은 'Next Question'을 눌렀을 때 초기화된 상태여야 진입하므로 안전)
 #         new_id = get_next_word()
 #         if new_id is not None:
 #             st.session_state.current_word_id = new_id
@@ -784,6 +780,7 @@ if st.session_state.app_mode == 'setup':
 #     current_word_row = df_all[df_all['id'] == current_id].iloc[0]
 #     word_text = str(current_word_row.get('word', '')).strip()
 
+#     # 문제 텍스트 표시
 #     st.markdown(st.session_state.question_text)
 
 #     if st.session_state.question_type == 'blank':
@@ -803,24 +800,29 @@ if st.session_state.app_mode == 'setup':
 
 #     st.caption(f"Part of Speech: *{current_word_row.get('pos', '')}*")
 
-#     # 퀴즈 보기 버튼들
-#     if not st.session_state.quiz_answered:
-#         cols = st.columns(2)
-#         for i, option in enumerate(st.session_state.quiz_options):
-#             if cols[i % 2].button(option, key=f"btn_{i}", use_container_width=True):
-#                 st.session_state.quiz_answered = True
-#                 st.session_state.selected_option = option
+#     # --- [수정됨] 퀴즈 보기 버튼 표시 (항상 표시됨) ---
+#     cols = st.columns(2)
+    
+#     # 이미 답을 했다면 버튼을 비활성화(disabled=True) 처리
+#     disable_buttons = st.session_state.quiz_answered
 
-#                 is_correct = option in st.session_state.correct_answers
-#                 update_srs(current_id, is_correct)
-#                 st.rerun()
+#     for i, option in enumerate(st.session_state.quiz_options):
+#         # 버튼 생성
+#         if cols[i % 2].button(option, key=f"btn_{i}", use_container_width=True, disabled=disable_buttons):
+#             # 버튼이 눌렸을 때 실행되는 로직 (아직 안 풀었을 때만 작동)
+#             st.session_state.quiz_answered = True
+#             st.session_state.selected_option = option
 
-#     # 정답 확인 및 해설 화면
-#     else:
+#             is_correct = option in st.session_state.correct_answers
+#             update_srs(current_id, is_correct)
+#             st.rerun()
+
+#     # --- 정답 확인 및 해설 화면 (답을 골랐을 때만 아래쪽에 표시) ---
+#     if st.session_state.quiz_answered:
 #         selected = st.session_state.selected_option
 #         is_correct = selected in st.session_state.correct_answers
         
-#         # 보기와 정답 교집합 찾기 (이전 수정사항 반영)
+#         # 보기와 정답 교집합 찾기
 #         displayed_options_set = set(st.session_state.quiz_options)
 #         valid_options_in_display = list(st.session_state.correct_answers.intersection(displayed_options_set))
 
@@ -847,16 +849,14 @@ if st.session_state.app_mode == 'setup':
 #             if colls:
 #                 st.caption("Collocations: " + ", ".join(colls))
 
-#         # [수정 2] 버튼 로직 변경: 마지막 문제라면 버튼 텍스트를 바꾸고, 누르면 Summary로 이동
+#         # 다음 문제 / 종료 버튼
 #         is_last_question = (stats['total'] >= goal)
 #         btn_label = "Finish Session 🏆" if is_last_question else "Next Question ➡️"
         
 #         if st.button(btn_label, type="primary"):
 #             if is_last_question:
-#                 # 목표 달성 시 요약 페이지로
 #                 st.session_state.app_mode = 'summary'
 #             else:
-#                 # 다음 문제로
 #                 st.session_state.current_word_id = None
 #                 st.session_state.quiz_answered = False
 #                 st.session_state.selected_option = None
@@ -875,13 +875,12 @@ elif st.session_state.app_mode == 'quiz':
     goal = config['goal']
     current = stats['total']
     
-    # 진행률 표시
     st.progress(min(current / goal, 1.0))
     st.caption(f"Progress: {current} / {goal} (Topic: {config['topic']})")
 
     df_all = st.session_state.vocab_db
 
-    # --- 문제 로딩 로직 ---
+    # --- [문제 로딩 로직] ---
     if st.session_state.current_word_id is None:
         new_id = get_next_word()
         if new_id is not None:
@@ -896,12 +895,12 @@ elif st.session_state.app_mode == 'quiz':
             st.session_state.correct_answers = correct_set
             st.session_state.example_blank_to_show = extra.get('example_blank', '')
 
+            # 상태 초기화
             st.session_state.quiz_answered = False
             st.session_state.selected_option = None
+            st.session_state.clarification_text = ""  # [추가] 해설 내용 초기화
         else:
             st.warning("No words matching your criteria!")
-            if config['mode'] == 'Review Mistakes Only':
-                st.info("💡 You have no recorded mistakes yet! Try 'Standard Study (SRS)'.")
             if st.button("Back to Setup"):
                 st.session_state.app_mode = 'setup'
                 st.rerun()
@@ -911,7 +910,7 @@ elif st.session_state.app_mode == 'quiz':
     current_word_row = df_all[df_all['id'] == current_id].iloc[0]
     word_text = str(current_word_row.get('word', '')).strip()
 
-    # 문제 텍스트 표시
+    # 문제 표시
     st.markdown(st.session_state.question_text)
 
     if st.session_state.question_type == 'blank':
@@ -931,29 +930,26 @@ elif st.session_state.app_mode == 'quiz':
 
     st.caption(f"Part of Speech: *{current_word_row.get('pos', '')}*")
 
-    # --- [수정됨] 퀴즈 보기 버튼 표시 (항상 표시됨) ---
+    # --- [퀴즈 보기 버튼] ---
     cols = st.columns(2)
-    
-    # 이미 답을 했다면 버튼을 비활성화(disabled=True) 처리
     disable_buttons = st.session_state.quiz_answered
 
     for i, option in enumerate(st.session_state.quiz_options):
-        # 버튼 생성
         if cols[i % 2].button(option, key=f"btn_{i}", use_container_width=True, disabled=disable_buttons):
-            # 버튼이 눌렸을 때 실행되는 로직 (아직 안 풀었을 때만 작동)
             st.session_state.quiz_answered = True
             st.session_state.selected_option = option
-
+            
+            # 정답 판별
             is_correct = option in st.session_state.correct_answers
             update_srs(current_id, is_correct)
             st.rerun()
 
-    # --- 정답 확인 및 해설 화면 (답을 골랐을 때만 아래쪽에 표시) ---
+    # --- [정답 확인 및 해설 화면] ---
     if st.session_state.quiz_answered:
         selected = st.session_state.selected_option
         is_correct = selected in st.session_state.correct_answers
         
-        # 보기와 정답 교집합 찾기
+        # 실제 표시된 정답 텍스트 찾기
         displayed_options_set = set(st.session_state.quiz_options)
         valid_options_in_display = list(st.session_state.correct_answers.intersection(displayed_options_set))
 
@@ -962,25 +958,76 @@ elif st.session_state.app_mode == 'quiz':
         else:
             final_answer_text = list(st.session_state.correct_answers)[0] if st.session_state.correct_answers else word_text
 
+        # 정오답 메시지
         if is_correct:
             st.success(f"✅ Correct! **'{selected}'**")
         else:
             st.error(f"❌ Incorrect. The answer is **'{final_answer_text}'**.")
 
         st.markdown("---")
-        st.markdown(f"#### 📖 Study: **{word_text}**")
+        
+        # [기존 단어 정보]
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.markdown(f"#### 📖 Study: **{word_text}**")
+            st.info(
+                f"**Definition:** {current_word_row.get('definition','')}\n\n"
+                f"**Example:** *{current_word_row.get('example','')}*"
+            )
+            if st.session_state.question_type == 'blank':
+                colls = parse_list(current_word_row.get('collocations', ''))
+                if colls:
+                    st.caption("Collocations: " + ", ".join(colls))
+        
+        # [추가 기능: AI 해설 요청] -----------------------------------------------
+        with col2:
+            st.markdown("#### 🤖 AI Assistant")
+            # 이미 해설이 생성되었으면 버튼 대신 내용을 보여줌 (혹은 버튼 아래에)
+            if st.button("🙋 Request Clarification", help="Ask AI why the other options are incorrect."):
+                
+                # Gemini 프롬프트 작성
+                prompt = f"""
+                I am an English learner studying TOEFL vocabulary.
+                I just answered a multiple-choice question and I need clarification on the nuance.
+                
+                Question Context: "{st.session_state.question_text}"
+                (If it's a fill-in-the-blank, the blank was meant for the word: "{word_text}")
+                
+                Options Provided: {st.session_state.quiz_options}
+                Correct Answer: "{final_answer_text}"
+                My Selected Answer: "{selected}"
+                
+                Please explain in Korean (but keep English terms):
+                1. Why is "{final_answer_text}" the most appropriate answer here? (Explain meaning and collocations).
+                2. Why is "{selected}" (or other options) less appropriate or incorrect in this specific context? 
+                
+                Keep the explanation concise but clear, focusing on 'nuance' and 'collocation'.
+                """
+                
+                try:
+                    with st.spinner("AI is analyzing the options..."):
+                        # [주의] main.py 상단에서 model = genai.GenerativeModel(...)이 선언되어 있어야 합니다.
+                        # 만약 model 변수명이 다르다면 수정해주세요.
+                        import google.generativeai as genai
+                        # 모델이 전역 변수에 없으면 여기서 초기화 (API KEY 필요)
+                        # model = genai.GenerativeModel('gemini-pro') 
+                        
+                        response = model.generate_content(prompt)
+                        st.session_state.clarification_text = response.text
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
 
-        st.info(
-            f"**Definition:** {current_word_row.get('definition','')}\n\n"
-            f"**Example:** *{current_word_row.get('example','')}*"
-        )
+        # AI 해설 결과 표시 (버튼 아래, 전체 너비)
+        if st.session_state.get('clarification_text'):
+            st.markdown("---")
+            st.markdown("### 💡 AI Clarification")
+            st.markdown(st.session_state.clarification_text)
+        # -----------------------------------------------------------------------
 
-        if st.session_state.question_type == 'blank':
-            colls = parse_list(current_word_row.get('collocations', ''))
-            if colls:
-                st.caption("Collocations: " + ", ".join(colls))
+        st.markdown("---")
 
-        # 다음 문제 / 종료 버튼
+        # [Next Question 버튼 로직]
         is_last_question = (stats['total'] >= goal)
         btn_label = "Finish Session 🏆" if is_last_question else "Next Question ➡️"
         
@@ -988,6 +1035,7 @@ elif st.session_state.app_mode == 'quiz':
             if is_last_question:
                 st.session_state.app_mode = 'summary'
             else:
+                # 다음 문제 준비하면서 모든 상태 초기화
                 st.session_state.current_word_id = None
                 st.session_state.quiz_answered = False
                 st.session_state.selected_option = None
@@ -996,6 +1044,7 @@ elif st.session_state.app_mode == 'quiz':
                 st.session_state.question_text = ""
                 st.session_state.quiz_options = []
                 st.session_state.example_blank_to_show = ""
+                st.session_state.clarification_text = "" # 해설 초기화
             
             st.rerun()
 
