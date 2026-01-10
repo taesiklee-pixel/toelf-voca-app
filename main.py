@@ -26,13 +26,13 @@ from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 import google.generativeai as genai
 
-# [수정됨] 모델 이름 변경 (gemini-pro -> gemini-1.5-flash)
+# [수정됨] 모델 이름 변경 (gemini-pro -> gemini-2.5-flash)
 # 1.5-flash 모델이 현재 가장 빠르고 안정적입니다.
 if "GEMINI_API_KEY" in st.secrets:
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         # 모델 이름을 최신 버전으로 변경했습니다.
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
     except Exception as e:
         st.error(f"Error configuring Gemini: {e}")
         model = None
