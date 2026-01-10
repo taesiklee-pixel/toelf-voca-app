@@ -3,3 +3,4 @@ pandas
 st-gsheets-connection
 gTTS
 google-genai
+google-generativeai
