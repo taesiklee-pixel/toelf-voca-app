@@ -850,10 +850,23 @@ elif st.session_state.app_mode == 'quiz':
                 update_srs(current_id, is_correct)
                 st.rerun()
 
-    else:
+else:
         selected = st.session_state.selected_option
         is_correct = selected in st.session_state.correct_answers
-        final_answer_text = list(st.session_state.correct_answers)[0] if st.session_state.correct_answers else word_text
+        
+        # [수정 로직 시작] -----------------------------------------------------------
+        # 정답 집합(correct_answers)과 실제 화면에 나온 보기(quiz_options)의 교집합을 찾습니다.
+        # 이렇게 해야 "보기에 없던 다른 유의어"가 정답으로 표시되는 것을 막을 수 있습니다.
+        displayed_options_set = set(st.session_state.quiz_options)
+        valid_options_in_display = list(st.session_state.correct_answers.intersection(displayed_options_set))
+
+        if valid_options_in_display:
+            # 보기에 있던 정답 중 하나를 선택
+            final_answer_text = valid_options_in_display[0]
+        else:
+            # (예외 처리) 만약 교집합이 없다면 기존 방식대로 아무 정답이나, 혹은 원래 단어를 표시
+            final_answer_text = list(st.session_state.correct_answers)[0] if st.session_state.correct_answers else word_text
+        # [수정 로직 끝] -------------------------------------------------------------
 
         if is_correct:
             st.success(f"✅ Correct! **'{selected}'**")
@@ -883,7 +896,7 @@ elif st.session_state.app_mode == 'quiz':
             st.session_state.quiz_options = []
             st.session_state.example_blank_to_show = ""
             st.rerun()
-
+            
 elif st.session_state.app_mode == 'summary':
     st.balloons()
     st.markdown("## 🏆 Session Complete!")
