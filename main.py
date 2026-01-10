@@ -766,17 +766,44 @@ if st.session_state.app_mode == 'setup':
 
         submitted = st.form_submit_button("🚀 Start Session", use_container_width=True)
 
+        # if submitted:
+        #     st.session_state.session_config = {
+        #         'topic': sel_topic,
+        #         'goal': sel_goal,
+        #         'difficulty': sel_diff,
+        #         'mode': sel_mode
+        #     }
+        #     st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
+        #     st.session_state.app_mode = 'quiz'
+        #     st.rerun()
+
         if submitted:
+            # 1. 세션 설정 저장
             st.session_state.session_config = {
                 'topic': sel_topic,
                 'goal': sel_goal,
                 'difficulty': sel_diff,
                 'mode': sel_mode
             }
+            
+            # 2. 통계 초기화
             st.session_state.session_stats = {'correct': 0, 'wrong': 0, 'total': 0}
+            
+            # [추가된 부분] 3. 이전 세션의 문제 상태 완전 초기화
+            # 이 부분이 없으면 이전 세션의 마지막 문제가 화면에 뜹니다.
+            st.session_state.current_word_id = None
+            st.session_state.quiz_answered = False
+            st.session_state.selected_option = None
+            st.session_state.correct_answers = set()
+            st.session_state.question_type = None
+            st.session_state.question_text = ""
+            st.session_state.quiz_options = []
+            st.session_state.example_blank_to_show = ""
+
+            # 4. 퀴즈 모드로 전환
             st.session_state.app_mode = 'quiz'
             st.rerun()
-
+            
 # elif st.session_state.app_mode == 'quiz':
 #     config = st.session_state.session_config
 #     stats = st.session_state.session_stats
