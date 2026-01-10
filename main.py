@@ -1,3 +1,18 @@
+# import streamlit as st
+# import pandas as pd
+# import datetime
+# import random
+# import ast
+# import json
+# import re
+# import time
+# from io import BytesIO
+# from gtts import gTTS
+# from streamlit_gsheets import GSheetsConnection
+
+# # [추가된 부분 1] Gemini 라이브러리 임포트
+# import google.generativeai as genai
+
 import streamlit as st
 import pandas as pd
 import datetime
@@ -10,9 +25,23 @@ from io import BytesIO
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
-# [추가된 부분 1] Gemini 라이브러리 임포트
+# [중요] Gemini 라이브러리 임포트
 import google.generativeai as genai
 
+# [중요] 모델 초기화 (이 부분이 없으면 에러가 납니다!)
+# 1. API 키가 secrets에 있는지 확인
+if "GEMINI_API_KEY" in st.secrets:
+    try:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        model = genai.GenerativeModel('gemini-pro')
+    except Exception as e:
+        st.error(f"Error configuring Gemini: {e}")
+        model = None
+else:
+    # 키가 없으면 model을 None으로 설정 (나중에 에러 메시지를 띄우기 위함)
+    model = None
+
+# --- 여기까지가 초기 설정입니다. 이 아래부터 def main(): 등의 코드가 이어집니다. ---
 # =========================================================
 # 0) Config
 # =========================================================
