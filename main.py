@@ -850,7 +850,7 @@ elif st.session_state.app_mode == 'quiz':
                 update_srs(current_id, is_correct)
                 st.rerun()
 
-else:
+    else:
         selected = st.session_state.selected_option
         is_correct = selected in st.session_state.correct_answers
         
