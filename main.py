@@ -1009,44 +1009,86 @@ elif st.session_state.app_mode == 'quiz':
                 if colls:
                     st.caption("Collocations: " + ", ".join(colls))
         
-        # [추가 기능: AI 해설 요청] -----------------------------------------------
-        with col2:
-            st.markdown("#### 🤖 AI Assistant")
-            # 이미 해설이 생성되었으면 버튼 대신 내용을 보여줌 (혹은 버튼 아래에)
+        # # [추가 기능: AI 해설 요청] -----------------------------------------------
+        # with col2:
+        #     st.markdown("#### 🤖 AI Assistant")
+        #     # 이미 해설이 생성되었으면 버튼 대신 내용을 보여줌 (혹은 버튼 아래에)
+        #     if st.button("🙋 Request Clarification", help="Ask AI why the other options are incorrect."):
+                
+        #         # Gemini 프롬프트 작성
+        #         prompt = f"""
+        #         I am an English learner studying TOEFL vocabulary.
+        #         I just answered a multiple-choice question and I need clarification on the nuance.
+                
+        #         Question Context: "{st.session_state.question_text}"
+        #         (If it's a fill-in-the-blank, the blank was meant for the word: "{word_text}")
+                
+        #         Options Provided: {st.session_state.quiz_options}
+        #         Correct Answer: "{final_answer_text}"
+        #         My Selected Answer: "{selected}"
+                
+        #         Please explain in Korean (but keep English terms):
+        #         1. Why is "{final_answer_text}" the most appropriate answer here? (Explain meaning and collocations).
+        #         2. Why is "{selected}" (or other options) less appropriate or incorrect in this specific context? 
+                
+        #         Keep the explanation concise but clear, focusing on 'nuance' and 'collocation'.
+        #         """
+                
+        #         try:
+        #             with st.spinner("AI is analyzing the options..."):
+        #                 # [주의] main.py 상단에서 model = genai.GenerativeModel(...)이 선언되어 있어야 합니다.
+        #                 # 만약 model 변수명이 다르다면 수정해주세요.
+        #                 import google.generativeai as genai
+        #                 # 모델이 전역 변수에 없으면 여기서 초기화 (API KEY 필요)
+        #                 # model = genai.GenerativeModel('gemini-pro') 
+                        
+        #                 response = model.generate_content(prompt)
+        #                 st.session_state.clarification_text = response.text
+        #                 st.rerun()
+        #         except Exception as e:
+        #             st.error(f"AI Error: {e}")
+        # ... (위쪽 코드 생략: 정답/오답 표시 부분) ...
+
+            # [수정됨] AI 해설 요청 버튼 로직
             if st.button("🙋 Request Clarification", help="Ask AI why the other options are incorrect."):
                 
-                # Gemini 프롬프트 작성
-                prompt = f"""
-                I am an English learner studying TOEFL vocabulary.
-                I just answered a multiple-choice question and I need clarification on the nuance.
-                
-                Question Context: "{st.session_state.question_text}"
-                (If it's a fill-in-the-blank, the blank was meant for the word: "{word_text}")
-                
-                Options Provided: {st.session_state.quiz_options}
-                Correct Answer: "{final_answer_text}"
-                My Selected Answer: "{selected}"
-                
-                Please explain in Korean (but keep English terms):
-                1. Why is "{final_answer_text}" the most appropriate answer here? (Explain meaning and collocations).
-                2. Why is "{selected}" (or other options) less appropriate or incorrect in this specific context? 
-                
-                Keep the explanation concise but clear, focusing on 'nuance' and 'collocation'.
-                """
-                
-                try:
-                    with st.spinner("AI is analyzing the options..."):
-                        # [주의] main.py 상단에서 model = genai.GenerativeModel(...)이 선언되어 있어야 합니다.
-                        # 만약 model 변수명이 다르다면 수정해주세요.
-                        import google.generativeai as genai
-                        # 모델이 전역 변수에 없으면 여기서 초기화 (API KEY 필요)
-                        # model = genai.GenerativeModel('gemini-pro') 
-                        
-                        response = model.generate_content(prompt)
-                        st.session_state.clarification_text = response.text
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"AI Error: {e}")
+                # 안전장치: 모델 확인
+                if 'model' not in globals() or model is None:
+                    st.error("⚠️ AI Model is not active. Please check your 'GEMINI_API_KEY' in Streamlit secrets.")
+                else:
+                    # [중요] 변수를 명시적으로 가져와서 문자열로 변환 (None 방지)
+                    q_text_safe = str(st.session_state.question_text)
+                    target_word_safe = str(word_text)
+                    
+                    # Gemini에게 보낼 프롬프트를 아주 상세하게 재구성
+                    prompt = f"""
+                    I am an English learner studying TOEFL vocabulary.
+                    I just answered a multiple-choice question but I got it wrong (or I am confused).
+                    
+                    --- INFORMATION ---
+                    1. **Target Vocabulary**: "{target_word_safe}"
+                    2. **Question Text (Context)**: "{q_text_safe}"
+                       (Note: If the question text contains '_____', it is a fill-in-the-blank question. If it just shows a word, it is a Synonym question.)
+                    3. **Options Provided**: {st.session_state.quiz_options}
+                    4. **Correct Answer**: "{final_answer_text}"
+                    5. **My Selected Answer**: "{selected}"
+                    -------------------
+                    
+                    Please explain in Korean (but use English for specific terms):
+                    1. Analyze the "Question Text". If it's a sentence, explain the context clues that lead to the correct answer.
+                    2. Why is "{final_answer_text}" the best fit for this context/meaning? (Explain collocations if applicable).
+                    3. Why is my choice "{selected}" incorrect or less appropriate in this specific context?
+                    
+                    Keep the explanation clear and helpful for a TOEFL student.
+                    """
+                    
+                    try:
+                        with st.spinner("AI is analyzing the context..."):
+                            response = model.generate_content(prompt)
+                            st.session_state.clarification_text = response.text
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
 
         # AI 해설 결과 표시 (버튼 아래, 전체 너비)
         if st.session_state.get('clarification_text'):
