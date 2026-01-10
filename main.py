@@ -10,6 +10,9 @@ from io import BytesIO
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
+# [추가된 부분 1] Gemini 라이브러리 임포트
+import google.generativeai as genai
+
 # =========================================================
 # 0) Config
 # =========================================================
