@@ -777,22 +777,145 @@ if st.session_state.app_mode == 'setup':
             st.session_state.app_mode = 'quiz'
             st.rerun()
 
+# elif st.session_state.app_mode == 'quiz':
+#     config = st.session_state.session_config
+#     stats = st.session_state.session_stats
+
+#     goal = config['goal']
+#     current = stats['total']
+#     st.progress(min(current / goal, 1.0))
+#     st.caption(f"Progress: {current} / {goal} (Topic: {config['topic']})")
+
+#     if current >= goal:
+#         st.session_state.app_mode = 'summary'
+#         st.rerun()
+
+#     df_all = st.session_state.vocab_db
+
+#     if st.session_state.current_word_id is None:
+#         new_id = get_next_word()
+#         if new_id is not None:
+#             st.session_state.current_word_id = new_id
+#             current_word = df_all[df_all['id'] == new_id].iloc[0]
+
+#             qtype, qtext, options, correct_set, extra = build_question_for_word(current_word, df_all)
+
+#             st.session_state.question_type = qtype
+#             st.session_state.question_text = qtext
+#             st.session_state.quiz_options = options
+#             st.session_state.correct_answers = correct_set
+#             st.session_state.example_blank_to_show = extra.get('example_blank', '')
+
+#             st.session_state.quiz_answered = False
+#             st.session_state.selected_option = None
+#         else:
+#             st.warning("No words matching your criteria!")
+#             if config['mode'] == 'Review Mistakes Only':
+#                 st.info("💡 You have no recorded mistakes yet! Try 'Standard Study (SRS)'.")
+#             if st.button("Back to Setup"):
+#                 st.session_state.app_mode = 'setup'
+#                 st.rerun()
+#             st.stop()
+
+#     current_id = st.session_state.current_word_id
+#     current_word_row = df_all[df_all['id'] == current_id].iloc[0]
+#     word_text = str(current_word_row.get('word', '')).strip()
+
+#     st.markdown(st.session_state.question_text)
+
+#     if st.session_state.question_type == 'blank':
+#         blank_sentence = st.session_state.example_blank_to_show
+#         if blank_sentence:
+#             st.info(blank_sentence)
+
+#     try:
+#         sound_file = BytesIO()
+#         tts = gTTS(text=word_text, lang='en')
+#         tts.write_to_fp(sound_file)
+#         sound_file.seek(0)
+#         st.audio(sound_file, format='audio/mpeg')
+#     except Exception:
+#         pass
+
+#     st.caption(f"Part of Speech: *{current_word_row.get('pos', '')}*")
+
+#     if not st.session_state.quiz_answered:
+#         cols = st.columns(2)
+#         for i, option in enumerate(st.session_state.quiz_options):
+#             if cols[i % 2].button(option, key=f"btn_{i}", use_container_width=True):
+#                 st.session_state.quiz_answered = True
+#                 st.session_state.selected_option = option
+
+#                 is_correct = option in st.session_state.correct_answers
+#                 update_srs(current_id, is_correct)
+#                 st.rerun()
+
+#     else:
+#         selected = st.session_state.selected_option
+#         is_correct = selected in st.session_state.correct_answers
+        
+#         # [수정 로직 시작] -----------------------------------------------------------
+#         # 정답 집합(correct_answers)과 실제 화면에 나온 보기(quiz_options)의 교집합을 찾습니다.
+#         # 이렇게 해야 "보기에 없던 다른 유의어"가 정답으로 표시되는 것을 막을 수 있습니다.
+#         displayed_options_set = set(st.session_state.quiz_options)
+#         valid_options_in_display = list(st.session_state.correct_answers.intersection(displayed_options_set))
+
+#         if valid_options_in_display:
+#             # 보기에 있던 정답 중 하나를 선택
+#             final_answer_text = valid_options_in_display[0]
+#         else:
+#             # (예외 처리) 만약 교집합이 없다면 기존 방식대로 아무 정답이나, 혹은 원래 단어를 표시
+#             final_answer_text = list(st.session_state.correct_answers)[0] if st.session_state.correct_answers else word_text
+#         # [수정 로직 끝] -------------------------------------------------------------
+
+#         if is_correct:
+#             st.success(f"✅ Correct! **'{selected}'**")
+#         else:
+#             st.error(f"❌ Incorrect. The answer is **'{final_answer_text}'**.")
+
+#         st.markdown("---")
+#         st.markdown(f"#### 📖 Study: **{word_text}**")
+
+#         st.info(
+#             f"**Definition:** {current_word_row.get('definition','')}\n\n"
+#             f"**Example:** *{current_word_row.get('example','')}*"
+#         )
+
+#         if st.session_state.question_type == 'blank':
+#             colls = parse_list(current_word_row.get('collocations', ''))
+#             if colls:
+#                 st.caption("Collocations: " + ", ".join(colls))
+
+#         if st.button("Next Question ➡️", type="primary"):
+#             st.session_state.current_word_id = None
+#             st.session_state.quiz_answered = False
+#             st.session_state.selected_option = None
+#             st.session_state.correct_answers = set()
+#             st.session_state.question_type = None
+#             st.session_state.question_text = ""
+#             st.session_state.quiz_options = []
+#             st.session_state.example_blank_to_show = ""
+#             st.rerun()
+
 elif st.session_state.app_mode == 'quiz':
     config = st.session_state.session_config
     stats = st.session_state.session_stats
 
     goal = config['goal']
     current = stats['total']
+    
+    # [수정 1] 진행률 바는 보여주되, 여기서 바로 summary로 보내지 않습니다.
+    # (기존에 있던 if current >= goal: ... 코드를 삭제했습니다)
+    
     st.progress(min(current / goal, 1.0))
     st.caption(f"Progress: {current} / {goal} (Topic: {config['topic']})")
 
-    if current >= goal:
-        st.session_state.app_mode = 'summary'
-        st.rerun()
-
     df_all = st.session_state.vocab_db
 
+    # 문제 로딩 로직
     if st.session_state.current_word_id is None:
+        # 목표를 다 채웠다면, 문제를 더 내지 않고 Summary로 갈 준비를 함
+        # (하지만 이 블록은 'Next Question'을 눌렀을 때 초기화된 상태여야 진입하므로 안전)
         new_id = get_next_word()
         if new_id is not None:
             st.session_state.current_word_id = new_id
@@ -828,6 +951,7 @@ elif st.session_state.app_mode == 'quiz':
         if blank_sentence:
             st.info(blank_sentence)
 
+    # TTS
     try:
         sound_file = BytesIO()
         tts = gTTS(text=word_text, lang='en')
@@ -839,6 +963,7 @@ elif st.session_state.app_mode == 'quiz':
 
     st.caption(f"Part of Speech: *{current_word_row.get('pos', '')}*")
 
+    # 퀴즈 보기 버튼들
     if not st.session_state.quiz_answered:
         cols = st.columns(2)
         for i, option in enumerate(st.session_state.quiz_options):
@@ -850,23 +975,19 @@ elif st.session_state.app_mode == 'quiz':
                 update_srs(current_id, is_correct)
                 st.rerun()
 
+    # 정답 확인 및 해설 화면
     else:
         selected = st.session_state.selected_option
         is_correct = selected in st.session_state.correct_answers
         
-        # [수정 로직 시작] -----------------------------------------------------------
-        # 정답 집합(correct_answers)과 실제 화면에 나온 보기(quiz_options)의 교집합을 찾습니다.
-        # 이렇게 해야 "보기에 없던 다른 유의어"가 정답으로 표시되는 것을 막을 수 있습니다.
+        # 보기와 정답 교집합 찾기 (이전 수정사항 반영)
         displayed_options_set = set(st.session_state.quiz_options)
         valid_options_in_display = list(st.session_state.correct_answers.intersection(displayed_options_set))
 
         if valid_options_in_display:
-            # 보기에 있던 정답 중 하나를 선택
             final_answer_text = valid_options_in_display[0]
         else:
-            # (예외 처리) 만약 교집합이 없다면 기존 방식대로 아무 정답이나, 혹은 원래 단어를 표시
             final_answer_text = list(st.session_state.correct_answers)[0] if st.session_state.correct_answers else word_text
-        # [수정 로직 끝] -------------------------------------------------------------
 
         if is_correct:
             st.success(f"✅ Correct! **'{selected}'**")
@@ -886,17 +1007,27 @@ elif st.session_state.app_mode == 'quiz':
             if colls:
                 st.caption("Collocations: " + ", ".join(colls))
 
-        if st.button("Next Question ➡️", type="primary"):
-            st.session_state.current_word_id = None
-            st.session_state.quiz_answered = False
-            st.session_state.selected_option = None
-            st.session_state.correct_answers = set()
-            st.session_state.question_type = None
-            st.session_state.question_text = ""
-            st.session_state.quiz_options = []
-            st.session_state.example_blank_to_show = ""
+        # [수정 2] 버튼 로직 변경: 마지막 문제라면 버튼 텍스트를 바꾸고, 누르면 Summary로 이동
+        is_last_question = (stats['total'] >= goal)
+        btn_label = "Finish Session 🏆" if is_last_question else "Next Question ➡️"
+        
+        if st.button(btn_label, type="primary"):
+            if is_last_question:
+                # 목표 달성 시 요약 페이지로
+                st.session_state.app_mode = 'summary'
+            else:
+                # 다음 문제로
+                st.session_state.current_word_id = None
+                st.session_state.quiz_answered = False
+                st.session_state.selected_option = None
+                st.session_state.correct_answers = set()
+                st.session_state.question_type = None
+                st.session_state.question_text = ""
+                st.session_state.quiz_options = []
+                st.session_state.example_blank_to_show = ""
+            
             st.rerun()
-
+            
 elif st.session_state.app_mode == 'summary':
     st.balloons()
     st.markdown("## 🏆 Session Complete!")
