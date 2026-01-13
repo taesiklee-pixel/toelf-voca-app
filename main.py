@@ -615,108 +615,111 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.header("QC (Gemini)")
+    # =========================================================
+    # Commening out QC (Gemini) from the side panel 01/13
+    # =========================================================    
+    # st.header("QC (Gemini)")
 
-    # ---- secrets 디버그: 지금 앱이 키를 읽는지 바로 확인 ----
-    with st.expander("🔎 Secrets debug (배포 후 한 번만 확인)"):
-        has_key = "GEMINI_API_KEY" in st.secrets
-        st.write("Has GEMINI_API_KEY in st.secrets:", has_key)
-        if has_key:
-            st.write("Key length:", len(str(st.secrets.get("GEMINI_API_KEY", ""))))
-        st.caption("키 값 자체는 노출하지 않습니다.")
+    # # ---- secrets 디버그: 지금 앱이 키를 읽는지 바로 확인 ----
+    # with st.expander("🔎 Secrets debug (배포 후 한 번만 확인)"):
+    #     has_key = "GEMINI_API_KEY" in st.secrets
+    #     st.write("Has GEMINI_API_KEY in st.secrets:", has_key)
+    #     if has_key:
+    #         st.write("Key length:", len(str(st.secrets.get("GEMINI_API_KEY", ""))))
+    #     st.caption("키 값 자체는 노출하지 않습니다.")
 
-    use_gemini = st.toggle(
-        "Use Gemini API",
-        value=True,
-        help="ON이면 Gemini가 실제로 문제를 풀어 선택/정오답을 기록합니다."
-    )
+    # use_gemini = st.toggle(
+    #     "Use Gemini API",
+    #     value=True,
+    #     help="ON이면 Gemini가 실제로 문제를 풀어 선택/정오답을 기록합니다."
+    # )
 
-    sim_n = st.number_input("Simulate N questions", min_value=1, max_value=2000, value=100, step=50)
+    # sim_n = st.number_input("Simulate N questions", min_value=1, max_value=2000, value=100, step=50)
 
-    # 모델 목록 로딩 (키가 있을 때만)
-    api_key = st.secrets.get("GEMINI_API_KEY", "")
-    model_candidates = []
-    model_name = DEFAULT_GEMINI_MODEL
+    # # 모델 목록 로딩 (키가 있을 때만)
+    # api_key = st.secrets.get("GEMINI_API_KEY", "")
+    # model_candidates = []
+    # model_name = DEFAULT_GEMINI_MODEL
 
-    if api_key:
-        try:
-            model_candidates = list_gemini_models(api_key)
-        except Exception as e:
-            model_candidates = []
-            st.caption(f"Model list failed (will use default): {type(e).__name__}")
+    # if api_key:
+    #     try:
+    #         model_candidates = list_gemini_models(api_key)
+    #     except Exception as e:
+    #         model_candidates = []
+    #         st.caption(f"Model list failed (will use default): {type(e).__name__}")
 
-    if model_candidates:
-        # 모델명은 "models/..." 형태로 올 수 있음. generate_content에는 그걸 그대로 써도 됨.
-        model_name = st.selectbox(
-            "Gemini model (generateContent 지원)",
-            options=model_candidates,
-            index=min(0, len(model_candidates) - 1)
-        )
-    else:
-        st.caption(f"Using default model: {DEFAULT_GEMINI_MODEL}")
+    # if model_candidates:
+    #     # 모델명은 "models/..." 형태로 올 수 있음. generate_content에는 그걸 그대로 써도 됨.
+    #     model_name = st.selectbox(
+    #         "Gemini model (generateContent 지원)",
+    #         options=model_candidates,
+    #         index=min(0, len(model_candidates) - 1)
+    #     )
+    # else:
+    #     st.caption(f"Using default model: {DEFAULT_GEMINI_MODEL}")
 
-    if st.button("Run QC Simulation"):
-        ok = ensure_qc_sheet_and_header()
-        if not ok:
-            st.stop()
+    # if st.button("Run QC Simulation"):
+    #     ok = ensure_qc_sheet_and_header()
+    #     if not ok:
+    #         st.stop()
 
-        if use_gemini and not api_key:
-            st.error("❌ GEMINI_API_KEY not found in st.secrets")
-            st.stop()
+    #     if use_gemini and not api_key:
+    #         st.error("❌ GEMINI_API_KEY not found in st.secrets")
+    #         st.stop()
 
-        df_all = st.session_state.vocab_db
-        session_id = random.randint(10, 10000)
+    #     df_all = st.session_state.vocab_db
+    #     session_id = random.randint(10, 10000)
 
-        logs = []
-        flagged = 0
+    #     logs = []
+    #     flagged = 0
 
-        sampled = df_all.sample(min(int(sim_n), len(df_all))).to_dict("records")
+    #     sampled = df_all.sample(min(int(sim_n), len(df_all))).to_dict("records")
 
-        for row in sampled:
-            qtype, qtext, options, correct_set, extra = build_question_for_word(row, df_all)
-            ex_blank = extra.get("example_blank", "")
+    #     for row in sampled:
+    #         qtype, qtext, options, correct_set, extra = build_question_for_word(row, df_all)
+    #         ex_blank = extra.get("example_blank", "")
 
-            qc = qc_with_gemini_or_fallback(
-                question_text=qtext,
-                example_blank=ex_blank,
-                options=options,
-                correct_answers=correct_set,
-                use_gemini=use_gemini,
-                api_key=api_key,
-                model_name=model_name if model_candidates else DEFAULT_GEMINI_MODEL
-            )
+    #         qc = qc_with_gemini_or_fallback(
+    #             question_text=qtext,
+    #             example_blank=ex_blank,
+    #             options=options,
+    #             correct_answers=correct_set,
+    #             use_gemini=use_gemini,
+    #             api_key=api_key,
+    #             model_name=model_name if model_candidates else DEFAULT_GEMINI_MODEL
+    #         )
 
-            if int(qc.get("flag", 0)) == 1:
-                flagged += 1
+    #         if int(qc.get("flag", 0)) == 1:
+    #             flagged += 1
 
-            llm_selected = str(qc.get("llm_selected", "")).strip()
-            llm_is_correct = str(qc.get("llm_is_correct", "")).strip()
+    #         llm_selected = str(qc.get("llm_selected", "")).strip()
+    #         llm_is_correct = str(qc.get("llm_is_correct", "")).strip()
 
-            # 절대 empty 방지
-            if not llm_selected:
-                llm_selected = options[0] if options else ""
-            if not llm_is_correct:
-                llm_is_correct = "TRUE" if (llm_selected in correct_set) else "FALSE"
+    #         # 절대 empty 방지
+    #         if not llm_selected:
+    #             llm_selected = options[0] if options else ""
+    #         if not llm_is_correct:
+    #             llm_is_correct = "TRUE" if (llm_selected in correct_set) else "FALSE"
 
-            logs.append({
-                "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "session_id": int(session_id),
-                "word_id": int(row.get("id")),
-                "word": str(row.get("word", "")),
-                "qtype": qtype,
-                "question_text": qtext,
-                "example_blank": ex_blank,
-                "options": json.dumps(options, ensure_ascii=False),
-                "correct_answers": json.dumps(sorted(list(correct_set)), ensure_ascii=False),
-                "llm_selected": llm_selected,
-                "llm_is_correct": llm_is_correct,  # TRUE/FALSE
-                "flag": int(qc.get("flag", 0)),
-                "reasons": json.dumps(qc.get("reasons", []), ensure_ascii=False),
-            })
+    #         logs.append({
+    #             "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    #             "session_id": int(session_id),
+    #             "word_id": int(row.get("id")),
+    #             "word": str(row.get("word", "")),
+    #             "qtype": qtype,
+    #             "question_text": qtext,
+    #             "example_blank": ex_blank,
+    #             "options": json.dumps(options, ensure_ascii=False),
+    #             "correct_answers": json.dumps(sorted(list(correct_set)), ensure_ascii=False),
+    #             "llm_selected": llm_selected,
+    #             "llm_is_correct": llm_is_correct,  # TRUE/FALSE
+    #             "flag": int(qc.get("flag", 0)),
+    #             "reasons": json.dumps(qc.get("reasons", []), ensure_ascii=False),
+    #         })
 
-        append_qc_log(logs)
-        st.success(f"QC done. Flagged: {flagged} / {len(logs)} (session_id={session_id})")
-        st.caption("Google Sheet → QC_Log 탭에서 확인하세요.")
+    #     append_qc_log(logs)
+    #     st.success(f"QC done. Flagged: {flagged} / {len(logs)} (session_id={session_id})")
+    #     st.caption("Google Sheet → QC_Log 탭에서 확인하세요.")
 
 # ---------------------------
 # Main App: Setup / Quiz / Summary
